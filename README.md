@@ -266,12 +266,3 @@ POST /api/settings
 
 Dieses Projekt ist unter der **MIT-Lizenz** lizenziert. Freie Nutzung, Anpassung und Weitergabe sind ausdrücklich gestattet.
 ```
-
-### So speicherst du die Datei
-
-1. **Alles im Code-Block markieren** (Klick oben rechts im Block auf „Kopieren")
-2. **Editor öffnen** (VS Code, Notepad++, Sublime, …)
-3. **Einfügen** → **Speichern unter** → `README.md`
-4. Fertig ✅
-
-Wenn du möchtest, kann ich dir zusätzlich noch eine `CHANGELOG.md`, eine `CONTRIBUTING.md` oder eine `.github/ISSUE_TEMPLATE` im gleichen Stil bauen – sag einfach Bescheid! 🛠️

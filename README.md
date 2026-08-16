@@ -1,6 +1,3 @@
-Hier ist dein vollständig aufgeräumtes Markdown-Dokument. Alle Überschriften, Code-Blöcke, Tabellen und der Architektur-Plan sind sauber formatiert. Der gesamte Inhalt befindet sich in **einem einzigen Code-Block** – einfach kopieren, in einen Texteditor (z. B. VS Code) einfügen und als `README.md` speichern.
-
-```markdown
 # 🎛️ Blackmagic HyperDeck Web Control & Auto-Loop
 
 Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Automatik (**24/7 Loop-Recording**) für **Blackmagic Design HyperDeck Studio** Recorder über das Ethernet-Protokoll (Port 9993).
@@ -31,23 +28,22 @@ Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Autom
 
 Standardmäßig stoppt ein Blackmagic HyperDeck die Aufnahme, sobald beide eingelegten Speicherkarten voll sind. Dieses Tool überwacht das Deck kontinuierlich und ermöglicht eine **unterbrechungsfreie Endlosaufnahme über Monate hinweg**. Droht die aktuell beschriebene Karte vollzulaufen, bereinigt das Skript die inaktive Nachbarkarte vollautomatisch über das offizielle 2-Phasen-Token-Protokoll von Blackmagic Design.
 
-### Typische Einsatzbereiche
-
-- **24/7 Daueraufzeichnung (Dashcam-/Ringspeicher-Prinzip):** Für Studios, Kirchen, Hörsäle oder Überwachungs-Feeds, bei denen immer die letzten Stunden oder Tage verfügbar sein müssen, ohne manuell Speicherkarten zu tauschen oder zu leeren.
-- **Compliance- & Sende-Logging:** Zuverlässige Protokollierung von Live-Sendungen und Event-Feeds zur rechtlichen Absicherung oder Fehlersuche.
-- **Rack-Fernsteuerung (Studio / Ü-Wagen):** Volle Kontrolle über das Deck von jedem PC, Laptop, Tablet oder Smartphone im Netzwerk, ohne vor das 19"-Geräterack treten zu müssen.
+### Typische Einsatzbereiche:
+* **24/7 Daueraufzeichnung (Dashcam-/Ringspeicher-Prinzip):** Für Studios, Kirchen, Hörsäle oder Überwachungs-Feeds, bei denen immer die letzten Stunden oder Tage verfügbar sein müssen, ohne manuell Speicherkarten zu tauschen oder zu leeren.
+* **Compliance- & Sende-Logging:** Zuverlässige Protokollierung von Live-Sendungen und Event-Feeds zur rechtlichen Absicherung oder Fehlersuche.
+* **Rack-Fernsteuerung (Studio / Ü-Wagen):** Volle Kontrolle über das Deck von jedem PC, Laptop, Tablet oder Smartphone im Netzwerk, ohne vor das 19"-Geräterack treten zu müssen.
 
 ---
 
 ## ✨ Hauptfunktionen
 
-- 🔄 **Intelligenter Auto-Loop:** Erkennt, wenn die aktive Karte unter den eingestellten Schwellenwert fällt (z. B. `< 5 Min.`), und formatiert die inaktive Karte rechtzeitig vor dem automatischen Slot-Wechsel.
-- 🔴 **Auto-Record:** Startet die Aufnahme selbstständig neu, falls das Gerät steht (z. B. nach Signalverlust oder Stromausfall).
-- 🔒 **Manueller Stopp-Schutz (Safety Interlock):** Drückt ein Operator manuell auf „Stopp", verriegelt sich Auto-Record. Die Automatik funkt nicht eigenmächtig dazwischen, bis sie explizit freigegeben oder eine neue Aufnahme gestartet wird.
-- 🕒 **Timecode-Synchronisation:** Setzt den Start-Timecode des Decks auf Wunsch automatisch auf die aktuelle PC-Systemzeit (`HH:MM:SS:00`).
-- ⚡ **BM-Token-Formatierung:** Vollständige Unterstützung des zweistufigen Blackmagic-Protokolls (`prepare` → `Token auslesen` → `confirm`) inklusive 180-Sekunden-Cooldown gegen Mehrfach-Löschungen.
-- 🌐 **Responsives Dark-Mode Webinterface:** Timecode, Tally, Füllstandsbalken, Live-Countdown und Systemlog synchronisieren sich verzögerungsfrei und flüssig im Browser.
-- 💾 **Live-Konfiguration:** Alle Parameter sind im laufenden Betrieb in der Web-UI änderbar und werden persistent in `hyperdeck_config.json` gespeichert.
+* 🔄 **Intelligenter Auto-Loop:** Erkennt, wenn die aktive Karte unter den eingestellten Schwellenwert fällt (z. B. `< 5 Min.`), und formatiert die inaktive Karte rechtzeitig vor dem automatischen Slot-Wechsel.
+* 🔴 **Auto-Record:** Startet die Aufnahme selbstständig neu, falls das Gerät steht (z. B. nach Signalverlust oder Stromausfall).
+* 🔒 **Manueller Stopp-Schutz (Safety Interlock):** Drückt ein Operator manuell auf „Stopp“, verriegelt sich Auto-Record. Die Automatik funkt nicht eigenmächtig dazwischen, bis sie explizit freigegeben oder eine neue Aufnahme gestartet wird.
+* 🕒 **Timecode-Synchronisation:** Setzt den Start-Timecode des Decks auf Wunsch automatisch auf die aktuelle PC-Systemzeit (`HH:MM:SS:00`).
+* ⚡ **BM-Token-Formatierung:** Vollständige Unterstützung des zweistufigen Blackmagic-Protokolls (`prepare` $\rightarrow$ `Token auslesen` $\rightarrow$ `confirm`) inklusive 180-Sekunden-Cooldown gegen Mehrfach-Löschungen.
+* 🌐 **Responsives Dark-Mode Webinterface:** Timecode, Tally, Füllstandsbalken, Live-Countdown und Systemlog synchronisieren sich verzögerungsfrei und flüssig im Browser.
+* 💾 **Live-Konfiguration:** Alle Parameter sind im laufenden Betrieb in der Web-UI änderbar und werden persistent in `hyperdeck_config.json` gespeichert.
 
 ---
 
@@ -67,14 +63,14 @@ Klassische Skripte frieren häufig ein, wenn Web-Anfragen und Überwachungsschle
 └──────────────┬──────────────────────────────▲───────────────┘
                │ jobs.put(...)                │ STATE Update
                ▼                              │
-┌──────────────────────────────┐   ┌──────────┴──────────────┐
-│     Thread-Safe Queue        │   │      Shared State       │
-└──────────────┬───────────────┘   └─────────────────────────┘
+┌──────────────────────────────┐ ┌────────────┴───────────────┐
+│     Thread-Safe Queue        │ │       Shared State         │
+└──────────────┬───────────────┘ └────────────────────────────┘
                │ job = jobs.get()
                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │               Dedizierter HyperDeck Worker-Thread           │
-│   - Besitzt genau EINE dauerhafte TCP-Verbindung (9993)     │
+│   - Besitzt genau EINE dauerhafte TCP-Verbindung (9993)    │
 │   - Zeilenbasierter Stream-Parser (ignoriert 5xx async)     │
 │   - Automatischer Reconnect mit Exponential Backoff         │
 └──────────────────────────────┬──────────────────────────────┘
@@ -83,7 +79,6 @@ Klassische Skripte frieren häufig ein, wenn Web-Anfragen und Überwachungsschle
 ┌─────────────────────────────────────────────────────────────┐
 │                 Blackmagic HyperDeck Studio                 │
 └─────────────────────────────────────────────────────────────┘
-```
 
 - **Kein Socket-Konflikt:** Flask redet niemals direkt mit dem Deck, sondern legt Aufträge in eine Queue.
 - **Echter Stream-Parser:** Antworten werden nach 3-stelligen Statuscodes (200 ok, 216 format ready) geparst. Unaufgeforderte asynchrone Statusmeldungen (5xx) werden sauber herausgefiltert.

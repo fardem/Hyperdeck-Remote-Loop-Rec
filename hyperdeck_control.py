@@ -14,7 +14,7 @@ Funktionen
   * Alle wichtigen Parameter sind im Browser aenderbar und werden in
     hyperdeck_config.json gespeichert.
 
-Architektur (das war die Ursache der Haenger im alten Script)
+Architektur 
   * GENAU EIN Thread spricht mit dem Deck, ueber GENAU EINE dauerhafte
     TCP-Verbindung. Die Flask-Endpunkte reden nie selbst mit dem Deck,
     sie legen nur Auftraege in eine Queue -> das Web-UI kann nicht blockieren

@@ -26,7 +26,7 @@ Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Autom
 
 ## 🎯 Überblick & Einsatzzwecke
 
-Standardmäßig stoppt ein Blackmagic HyperDeck die Aufnahme, sobald beide eingelegten Speicherkarten voll sind. Dieses Tool überwacht das Deck kontinuierlich und ermöglicht eine **unterbrechungsfreie Endlosaufnahme über Monate hinweg**. Droht die aktuell beschriebene Karte vollzulaufen, bereinigt das Skript die inaktive Nachbarkarte vollautomatisch über das offizielle 2-Phasen-Token-Protokoll von Blackmagic Design.
+Standardmäßig stoppt ein Blackmagic HyperDeck die Aufnahme, sobald beide eingelegten Speicherkarten voll sind. Dieses Tool überwacht das Deck kontinuierlich und ermöglicht eine **unterbrechungsfreie Endlosaufnahme über ein lange Zeit hinweg**. Droht die aktuell beschriebene Karte vollzulaufen, bereinigt das Skript die inaktive Nachbarkarte vollautomatisch über das offizielle 2-Phasen-Token-Protokoll von Blackmagic Design.
 
 ### Typische Einsatzbereiche:
 * **24/7 Daueraufzeichnung (Dashcam-/Ringspeicher-Prinzip):** Für Studios, Kirchen, Hörsäle oder Überwachungs-Feeds, bei denen immer die letzten Stunden oder Tage verfügbar sein müssen, ohne manuell Speicherkarten zu tauschen oder zu leeren.

@@ -14,13 +14,12 @@ Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Autom
 1. [Überblick & Einsatzzwecke](#-überblick--einsatzzwecke)
 2. [Hauptfunktionen](#-hauptfunktionen)
 3. [Architektur & Stabilität](#️-architektur--stabilität)
-4. [Installation & Schnellstart](#-installation--schnellstart)
-5. [Aufruf der Weboberfläche](#-aufruf-der-weboberfläche)
-6. [Übersicht der Web-UI & Einstellungen](#️-übersicht-der-web-ui--einstellungen)
-7. [CLI-Startparameter](#️-cli-startparameter)
-8. [REST-API Dokumentation](#-rest-api-dokumentation)
-9. [Fehlerbehebung (Troubleshooting)](#-fehlerbehebung-troubleshooting)
-10. [Lizenz](#-lizenz)
+4. [Aufruf der Weboberfläche](#-aufruf-der-weboberfläche)
+5. [Übersicht der Web-UI & Einstellungen](#️-übersicht-der-web-ui--einstellungen)
+6. [CLI-Startparameter](#️-cli-startparameter)
+7. [REST-API Dokumentation](#-rest-api-dokumentation)
+8. [Fehlerbehebung (Troubleshooting)](#-fehlerbehebung-troubleshooting)
+9. [Lizenz](#-lizenz)
 
 ---
 

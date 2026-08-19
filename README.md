@@ -85,6 +85,9 @@ Klassische Skripte frieren häufig ein, wenn Web-Anfragen und Überwachungsschle
 
 ---
 
+![Python]([https://img.shields.io/badge/Python-3.7%2B-blue](https://github.com/fardem/Hyperdeck-Remote-Loop-Rec/blob/main/Screenshoot.jpeg?raw=true)?logo=python&logoColor=white)
+
+
 ## 🚀 Installation & Schnellstart
 
 ### 1. Voraussetzungen

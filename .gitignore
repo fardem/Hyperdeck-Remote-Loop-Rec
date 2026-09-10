@@ -1,0 +1,8 @@
+# Laufzeitdaten - gehoeren nicht ins Repository
+hyperdeck_config.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/

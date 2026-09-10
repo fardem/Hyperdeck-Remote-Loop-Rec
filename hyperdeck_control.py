@@ -6,8 +6,11 @@ HyperDeck Studio - Web Control
 Fernsteuerung fuer Blackmagic HyperDeck ueber das Ethernet-Protokoll (Port 9993).
 
 Funktionen
-  * Auto-Record .... startet die Aufnahme automatisch, wenn das Deck steht
-  * Auto-Loop ...... formatiert rechtzeitig die inaktive Karte -> Endlosaufnahme
+  * Loop-Record .... Hauptschalter fuer die gesamte Endlos-Automatik
+      - Auto-Record .. startet die Aufnahme automatisch, wenn das Deck steht
+      - Auto-Loop .... formatiert rechtzeitig die inaktive Karte
+  * Timer-Aufnahme .. bis zu drei Zeitplaene (z. B. Mo-Fr 08:45-18:30).
+    Der Rekorder startet und stoppt ohne Zutun zur eingestellten Uhrzeit.
   * Manueller STOP bleibt STOP. Er setzt eine Verriegelung, die Auto-Record
     blockiert, bis im Web-UI wieder RECORD (oder "Auto-Record freigeben")
     gedrueckt wird.
@@ -24,9 +27,11 @@ Architektur
     uebersprungen, Mehrzeilenbloecke werden bis zur Leerzeile gelesen.
   * Jeder Fehler fuehrt zu sauberem Reconnect mit Backoff statt zum Stillstand.
 
-Start:
+Start (Windows: einfach start.bat doppelklicken):
     pip install flask
     python3 hyperdeck_control.py --ip 172.17.100.119 --web-port 5000
+
+Der Browser wird beim Start automatisch geoeffnet (--no-browser schaltet das ab).
 """
 
 import argparse
@@ -37,8 +42,11 @@ import os
 import queue
 import re
 import socket
+import sys
 import threading
 import time
+import traceback
+import webbrowser
 
 from flask import Flask, Response, jsonify, request
 
@@ -46,8 +54,19 @@ from flask import Flask, Response, jsonify, request
 # Konfiguration
 # --------------------------------------------------------------------------
 
+APP_VERSION = "3.0.0"       # wird in der Web-Oberflaeche und im Log angezeigt
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(APP_DIR, "hyperdeck_config.json")
+
+TIMER_SLOTS = 3             # mehr als drei Zeitplaene sind nicht vorgesehen
+WEEKDAYS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]   # Index = date.weekday()
+
+# Vorgabe: Autorecord 1 laeuft werktags von 08:45 bis 18:30
+DEFAULT_TIMERS = [
+    {"enabled": True, "days": [0, 1, 2, 3, 4], "start": "08:45", "end": "18:30"},
+    {"enabled": True, "days": [0, 1, 2, 3, 4], "start": "08:45", "end": "18:30"},
+    {"enabled": True, "days": [5, 6], "start": "08:45", "end": "18:30"},
+]
 
 DEFAULT_SETTINGS = {
     "deck_ip": "172.17.100.119",
@@ -55,11 +74,15 @@ DEFAULT_SETTINGS = {
     "check_interval": 20,           # Sekunden zwischen zwei Deck-Abfragen
     "min_remaining_threshold": 5,   # ab dieser Restzeit (min) wird vorbereitet
     "inactive_min_free": 15,        # inaktive Karte formatieren, wenn weniger frei
+    "loop_record": True,            # Hauptschalter der Endlos-Automatik
     "auto_record": True,
     "auto_loop": True,
     "sync_timecode": True,          # Timecode beim Start auf Uhrzeit setzen
     "format_filesystem": "exFAT",   # exFAT oder HFS+
     "format_name": "LoopDump",
+    "timer_enabled": False,         # Zeitgesteuerte Aufnahme (Timer-Recording)
+    "timer_count": 1,               # sichtbare/aktive Zeitplaene: 1 bis 3
+    "timers": copy.deepcopy(DEFAULT_TIMERS),
 }
 
 SETTING_TYPES = {
@@ -68,11 +91,15 @@ SETTING_TYPES = {
     "check_interval": int,
     "min_remaining_threshold": int,
     "inactive_min_free": int,
+    "loop_record": bool,
     "auto_record": bool,
     "auto_loop": bool,
     "sync_timecode": bool,
     "format_filesystem": str,
     "format_name": str,
+    "timer_enabled": bool,
+    "timer_count": int,
+    "timers": list,
 }
 
 LIMITS = {
@@ -80,10 +107,12 @@ LIMITS = {
     "check_interval": (5, 3600),
     "min_remaining_threshold": (1, 240),
     "inactive_min_free": (1, 2000),
+    "timer_count": (1, TIMER_SLOTS),
 }
 
-UI_VERSION = "2.1"          # muss mit UI_VERSION im HTML uebereinstimmen
 FORMAT_COOLDOWN_S = 180     # Sperre pro Slot nach einer Formatierung
+TIMER_RETRY_S = 10          # Wiederholabstand, wenn ein Timer-Befehl nicht griff
+TIMER_STOP_GRACE_S = 300    # so lange wird ein verpasster Timer-Stopp nachgeholt
 LOG_MAX = 250
 
 # Fehlercodes des HyperDeck-Protokolls, die haeufig vorkommen
@@ -111,7 +140,7 @@ ERROR_HINTS = {
 # Zustand, Einstellungen, Log
 # --------------------------------------------------------------------------
 
-SETTINGS = dict(DEFAULT_SETTINGS)
+SETTINGS = copy.deepcopy(DEFAULT_SETTINGS)   # eigene Kopie, nie die Vorgaben aendern
 _settings_lock = threading.RLock()
 
 STATE = {
@@ -130,24 +159,31 @@ STATE = {
     "seconds_until_check": 0,
     "last_poll": "",
     "last_format": {"1": "", "2": ""},
+    "timer_active": None,       # Nummer (1..3) des laufenden Zeitfensters
+    "timer_info": "Timer aus",  # Klartext fuer die Oberflaeche
 }
 _state_lock = threading.RLock()
 
 _logs = []
 _log_lock = threading.Lock()
+_log_seq = [0]
 _throttle = {}
 
 
 def log(msg, level="info"):
-    entry = {
-        "time": datetime.datetime.now().strftime("%H:%M:%S"),
-        "msg": str(msg),
-        "level": level,
-    }
-    print("[%s] %s" % (entry["time"], entry["msg"]), flush=True)
+    """Schreibt eine Zeile in Konsole und Web-Log. Jede Zeile hat eine ID,
+    damit der Browser nur die neuen Zeilen nachladen muss."""
+    stamp = datetime.datetime.now().strftime("%H:%M:%S")
+    text = str(msg)
     with _log_lock:
-        _logs.append(entry)
+        _log_seq[0] += 1
+        _logs.append({"id": _log_seq[0], "time": stamp, "msg": text, "level": level})
         del _logs[:-LOG_MAX]
+    try:
+        print("[%s] %s" % (stamp, text), flush=True)
+    except UnicodeEncodeError:      # exotische Konsolen-Codepage
+        print("[%s] %s" % (stamp, text.encode("ascii", "replace").decode("ascii")),
+              flush=True)
 
 
 def log_throttled(key, msg, level="info", period=120):
@@ -166,17 +202,93 @@ def set_state(**kwargs):
 
 def get_settings():
     with _settings_lock:
-        return dict(SETTINGS)
+        snapshot = dict(SETTINGS)
+    # Die Timer-Liste wird kopiert, damit kein Aufrufer die Originaldaten aendert.
+    snapshot["timers"] = copy.deepcopy(snapshot["timers"])
+    return snapshot
+
+
+# ---- Timer-Hilfsfunktionen -----------------------------------------------
+
+def _to_bool(value):
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "on", "yes", "ja")
+    return bool(value)
+
+
+def parse_hhmm(value, fallback="00:00"):
+    """Nimmt "8:45", "08:45" oder "08:45:00" und liefert immer "HH:MM"."""
+    match = re.match(r"^\s*(\d{1,2})\s*:\s*(\d{2})", str(value or ""))
+    if match is None:
+        return fallback
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if hour > 23 or minute > 59:
+        return fallback
+    return "%02d:%02d" % (hour, minute)
+
+
+def hhmm_to_minutes(value):
+    hour, minute = value.split(":")
+    return int(hour) * 60 + int(minute)
+
+
+def normalize_days(raw, fallback):
+    """Akzeptiert [0,1,2], "0,1,2" oder "Mo,Di" und liefert eine sortierte Liste."""
+    if isinstance(raw, (list, tuple)):
+        parts = list(raw)
+    elif isinstance(raw, str):
+        parts = [p for p in re.split(r"[,;\s]+", raw) if p]
+    else:
+        return list(fallback)
+    days = []
+    for part in parts:
+        try:
+            day = int(part)
+        except (TypeError, ValueError):
+            text = str(part).strip().lower()[:2]
+            lookup = [w.lower() for w in WEEKDAYS]
+            day = lookup.index(text) if text in lookup else -1
+        if 0 <= day <= 6 and day not in days:
+            days.append(day)
+    return sorted(days)
+
+
+def normalize_timers(raw):
+    """Erzwingt immer genau TIMER_SLOTS vollstaendige, plausible Eintraege."""
+    items = list(raw) if isinstance(raw, (list, tuple)) else []
+    result = []
+    for index in range(TIMER_SLOTS):
+        base = DEFAULT_TIMERS[index]
+        item = items[index] if index < len(items) and isinstance(items[index], dict) else {}
+        result.append({
+            "enabled": _to_bool(item.get("enabled", base["enabled"])),
+            "days": normalize_days(item.get("days", base["days"]), base["days"]),
+            "start": parse_hhmm(item.get("start", base["start"]), base["start"]),
+            "end": parse_hhmm(item.get("end", base["end"]), base["end"]),
+        })
+    return result
+
+
+def describe_days(days):
+    if not days:
+        return "kein Tag"
+    if days == [0, 1, 2, 3, 4]:
+        return "Mo-Fr"
+    if days == [0, 1, 2, 3, 4, 5, 6]:
+        return "taeglich"
+    if days == [5, 6]:
+        return "Sa+So"
+    return "+".join(WEEKDAYS[d] for d in days)
 
 
 def _coerce(key, value):
     kind = SETTING_TYPES[key]
+    if kind is list:
+        return normalize_timers(value)
     if kind is bool:
-        if isinstance(value, str):
-            return value.strip().lower() in ("1", "true", "on", "yes", "ja")
-        return bool(value)
+        return _to_bool(value)
     if kind is int:
-        value = int(value)
+        value = int(float(str(value).strip()))   # vertraegt auch "20" und "20.0"
         lo, hi = LIMITS.get(key, (None, None))
         if lo is not None:
             value = max(lo, min(hi, value))
@@ -517,16 +629,21 @@ def poll_deck():
 
 def run_automation(status, active, slots):
     cfg = get_settings()
+    loop_on = cfg["loop_record"]
     with _state_lock:
         manual_stop = STATE["manual_stop"]
 
     if not is_recording(status):
-        if cfg["auto_record"] and not manual_stop:
+        # Ist der Timer scharf, entscheidet allein der Zeitplan ueber Start und
+        # Stopp - sonst wuerde Auto-Record den Timer-Stopp sofort ueberrennen.
+        if cfg["timer_enabled"]:
+            return
+        if loop_on and cfg["auto_record"] and not manual_stop:
             log("Deck steht (Status: %s) - starte Aufnahme neu." % status, "warn")
             do_record(manual=False)
         return
 
-    if not cfg["auto_loop"] or active not in (1, 2):
+    if not loop_on or not cfg["auto_loop"] or active not in (1, 2):
         return
 
     other = 2 if active == 1 else 1
@@ -558,14 +675,166 @@ def run_automation(status, active, slots):
 
 
 # --------------------------------------------------------------------------
+# Timer-Aufnahme (Zeitsteuerung)
+# --------------------------------------------------------------------------
+
+_timer_state = {
+    "window": None,         # Kennung des laufenden Termins, z. B. "0@2026-09-07"
+    "index": None,          # Index (0..2) des laufenden Zeitplans
+    "next_try": 0.0,        # Monotonic-Zeit fuer den naechsten Versuch
+    "stop_until": 0.0,      # bis dahin wird ein verpasster Stopp nachgeholt
+    "next_desc": 0.0,       # Drosselung der Klartext-Berechnung
+}
+
+
+def active_timers(cfg):
+    """Nur die Eintraege, die laut Anzahl sichtbar und eingeschaltet sind."""
+    count = max(1, min(TIMER_SLOTS, int(cfg.get("timer_count", 1))))
+    result = []
+    for index, entry in enumerate(cfg["timers"][:count]):
+        if not entry["enabled"] or not entry["days"]:
+            continue
+        start = hhmm_to_minutes(entry["start"])
+        end = hhmm_to_minutes(entry["end"])
+        if start == end:            # Fenster ohne Laenge -> unbrauchbar
+            continue
+        result.append((index, entry, start, end))
+    return result
+
+
+def find_active_timer(cfg, now):
+    """Liefert (index, eintrag, kennung) des laufenden Fensters, sonst dreimal None.
+    Fenster mit Ende <= Start laufen ueber Mitternacht. Die Kennung enthaelt das
+    Startdatum des Termins - dadurch ist der Montag-Termin ein anderer als der
+    Dienstag-Termin desselben Zeitplans."""
+    minute_of_day = now.hour * 60 + now.minute
+    today = now.weekday()
+    yesterday = (today - 1) % 7
+    for index, entry, start, end in active_timers(cfg):
+        if end > start:
+            if today in entry["days"] and start <= minute_of_day < end:
+                return index, entry, "%d@%s" % (index, now.date())
+        else:
+            if today in entry["days"] and minute_of_day >= start:
+                return index, entry, "%d@%s" % (index, now.date())
+            if yesterday in entry["days"] and minute_of_day < end:
+                return index, entry, "%d@%s" % (
+                    index, now.date() - datetime.timedelta(days=1))
+    return None, None, None
+
+
+def next_timer_start(cfg, now):
+    """Naechster Aufnahmebeginn als (datetime, index) - oder (None, None)."""
+    best, best_index = None, None
+    for offset in range(0, 8):
+        day = (now + datetime.timedelta(days=offset)).date()
+        for index, entry, start, _end in active_timers(cfg):
+            if day.weekday() not in entry["days"]:
+                continue
+            when = datetime.datetime.combine(
+                day, datetime.time(start // 60, start % 60))
+            if when > now and (best is None or when < best):
+                best, best_index = when, index
+    return best, best_index
+
+
+def timer_info_text(cfg, now, index, entry):
+    if not cfg["timer_enabled"]:
+        return "Timer aus"
+    if index is not None:
+        return "Autorecord %d nimmt auf, Fenster bis %s Uhr" % (index + 1, entry["end"])
+    when, next_index = next_timer_start(cfg, now)
+    if when is None:
+        return "Kein Zeitplan aktiv"
+    day = "heute" if when.date() == now.date() else (
+        "morgen" if (when.date() - now.date()).days == 1 else WEEKDAYS[when.weekday()])
+    return "Nächster Start: Autorecord %d %s um %s Uhr" % (
+        next_index + 1, day, when.strftime("%H:%M"))
+
+
+def run_timer(now=None):
+    """Wird vom Worker haeufig aufgerufen. Startet und stoppt die Aufnahme
+    punktgenau, unabhaengig vom Abfrageintervall."""
+    cfg = get_settings()
+    now = now or datetime.datetime.now()
+    monotonic = time.monotonic()
+
+    if not cfg["timer_enabled"]:
+        with _state_lock:
+            stale = (STATE["timer_active"] is not None
+                     or STATE["timer_info"] != "Timer aus")
+        if stale or _timer_state["window"] is not None:
+            _timer_state.update({"window": None, "index": None,
+                                 "next_try": 0.0, "stop_until": 0.0})
+            set_state(timer_active=None, timer_info="Timer aus")
+        return
+
+    index, entry, window = find_active_timer(cfg, now)
+
+    # ---- Terminwechsel -----------------------------------------------
+    if window != _timer_state["window"]:
+        previous_index = _timer_state["index"]
+        _timer_state["window"] = window
+        _timer_state["index"] = index
+        _timer_state["next_try"] = 0.0
+        _timer_state["next_desc"] = 0.0        # Klartext sofort neu berechnen
+        if index is None:
+            # Fenster ist zu Ende: der Stopp wird notfalls mehrfach nachgeholt.
+            _timer_state["stop_until"] = monotonic + TIMER_STOP_GRACE_S
+            log("Autorecord %d: Aufnahmefenster beendet - Aufnahme wird gestoppt."
+                % ((previous_index or 0) + 1), "warn")
+        else:
+            _timer_state["stop_until"] = 0.0
+            set_state(manual_stop=False)   # neuer Termin hebt die Verriegelung auf
+            log("Autorecord %d: Aufnahmefenster %s-%s (%s) beginnt - Aufnahme startet."
+                % (index + 1, entry["start"], entry["end"], describe_days(entry["days"])),
+                "ok")
+        set_state(timer_active=(index + 1) if index is not None else None)
+
+    # ---- Klartext fuer die Oberflaeche (gedrosselt, da 8-Tage-Suche) ---
+    if monotonic >= _timer_state["next_desc"]:
+        _timer_state["next_desc"] = monotonic + 5.0
+        set_state(timer_info=timer_info_text(cfg, now, index, entry))
+
+    with _state_lock:
+        recording = is_recording(STATE["status"])
+        manual_stop = STATE["manual_stop"]
+
+    if monotonic < _timer_state["next_try"]:
+        return
+
+    if index is not None:
+        # Innerhalb des Fensters: Aufnahme sicherstellen (auch nach Stromausfall
+        # oder Verbindungsabbruch), aber einen manuellen Stopp respektieren.
+        if recording or manual_stop:
+            return
+        _timer_state["next_try"] = monotonic + TIMER_RETRY_S
+        do_record(manual=False)
+        return
+
+    # Ausserhalb aller Fenster wird nur ein frisch verpasster Stopp nachgeholt.
+    # Eine spaetere Aufnahme von Hand bleibt unangetastet.
+    if recording and monotonic < _timer_state["stop_until"]:
+        _timer_state["next_try"] = monotonic + TIMER_RETRY_S
+        do_stop(manual=False)
+    elif not recording:
+        _timer_state["stop_until"] = 0.0
+
+
+# --------------------------------------------------------------------------
 # Worker-Thread: einziger Besitzer der Deck-Verbindung
 # --------------------------------------------------------------------------
 
 def handle_job(job):
     action = job.get("action")
     if action == "record":
+        # Ein bewusster Start hebt einen noch offenen Timer-Stopp auf.
+        _timer_state["stop_until"] = 0.0
+        _timer_state["next_try"] = 0.0
         do_record(manual=True)
     elif action == "stop":
+        _timer_state["stop_until"] = 0.0
+        _timer_state["next_try"] = time.monotonic() + TIMER_RETRY_S
         do_stop(manual=True)
     elif action == "format":
         try:
@@ -619,11 +888,16 @@ def worker_loop():
                 force_poll = True
 
             now = time.monotonic()
-            interval = get_settings()["check_interval"]
+            interval = cfg["check_interval"]
             if force_poll or now - last_poll >= interval:
                 if deck.connected:
                     poll_deck()
                     last_poll = time.monotonic()
+
+            # Der Timer wird oft geprueft (nicht nur beim Poll), damit er die
+            # eingestellte Uhrzeit sekundengenau trifft.
+            if deck.connected:
+                run_timer()
 
             remaining = interval - (time.monotonic() - last_poll)
             set_state(seconds_until_check=max(0, int(round(remaining))))
@@ -674,6 +948,9 @@ HTML_PAGE = r"""<!doctype html>
   --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Roboto Mono",monospace;
 }
 *{box-sizing:border-box;margin:0;padding:0}
+/* Ohne !important gewinnt eine eigene display-Regel gegen das hidden-Attribut -
+   dann blieben ausgeblendete Hinweisleisten als leere Balken stehen. */
+[hidden]{display:none!important}
 html{-webkit-text-size-adjust:100%}
 body{
   background:var(--bg);
@@ -691,6 +968,9 @@ body{
 .top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .top h1{font-size:16px;font-weight:650;letter-spacing:-.01em}
 .host{font-family:var(--mono);font-size:12px;color:var(--dim2)}
+.badge{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:600;
+  color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:2px 9px;
+  margin-left:9px;vertical-align:middle;letter-spacing:.02em}
 .link{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim)}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--dim2);flex:none}
 .dot.on{background:var(--ok);box-shadow:0 0 0 3px rgba(53,208,127,.15)}
@@ -720,6 +1000,7 @@ body{
 .notice.lock{background:rgba(255,176,32,.10);border:1px solid rgba(255,176,32,.4);color:#ffd98a}
 .notice.busy{background:rgba(91,140,255,.10);border:1px solid rgba(91,140,255,.4);color:#bcd0ff}
 .notice.err{background:rgba(255,59,48,.10);border:1px solid rgba(255,59,48,.4);color:#ffb3ae}
+.notice.timer{background:rgba(53,208,127,.10);border:1px solid rgba(53,208,127,.4);color:#a6e9c6}
 
 /* Karten-Slots */
 .slots{display:grid;grid-template-columns:1fr 1fr;gap:12px}
@@ -770,6 +1051,20 @@ button:disabled{opacity:.45;cursor:not-allowed}
 input[type=checkbox]{position:absolute;opacity:0;width:0;height:0}
 input[type=checkbox]:focus-visible + .track{outline:2px solid var(--acc);outline-offset:2px}
 
+/* Zeitplaene */
+.trow{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-top:10px;
+  background:var(--panel-hi)}
+.trow.off{opacity:.5}
+.trow-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.trow-name{font-size:13.5px;font-weight:650}
+.trow-sum{font-size:11.5px;color:var(--dim2);margin-top:1px}
+.toggle-mini{display:flex;align-items:center;gap:9px;cursor:pointer;font-size:12px;color:var(--dim)}
+.days{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0}
+.day{font:inherit;font-size:12px;font-weight:600;min-width:44px;padding:7px 0;text-align:center;
+  border-radius:9px;border:1px solid var(--line);background:transparent;color:var(--dim2);cursor:pointer}
+.day.on{background:rgba(91,140,255,.16);border-color:rgba(91,140,255,.55);color:#cfdcff}
+.times{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+
 /* Einstellungen */
 .fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
 .field{display:flex;flex-direction:column;gap:6px}
@@ -803,7 +1098,7 @@ input[type=checkbox]:focus-visible + .track{outline:2px solid var(--acc);outline
   <div class="panel">
     <div class="top">
       <div>
-        <h1 id="device">HyperDeck Control</h1>
+        <h1><span id="device">HyperDeck Control</span><span class="badge" id="ver">v{{APP_VERSION}}</span></h1>
         <div class="host" id="host">--</div>
       </div>
       <div class="link"><span class="dot" id="dot"></span><span id="linkTxt">Verbinde …</span></div>
@@ -827,10 +1122,7 @@ input[type=checkbox]:focus-visible + .track{outline:2px solid var(--acc);outline
     </div>
   </div>
 
-  <div id="noticeStale" class="notice err" hidden>
-    <span>Der Browser zeigt eine veraltete Oberfläche. Lade die Seite mit Strg+Shift+R neu.</span>
-    <button class="b-sm" onclick="location.reload(true)">Neu laden</button>
-  </div>
+  <div id="noticeTimer" class="notice timer" hidden><span id="timerTxt"></span></div>
   <div id="noticeLock" class="notice lock" hidden>
     <span>Manuell gestoppt. Auto-Record bleibt aus, bis du ihn freigibst.</span>
     <button class="b-warn b-sm" onclick="send('resume_auto')">Auto-Record freigeben</button>
@@ -851,6 +1143,11 @@ input[type=checkbox]:focus-visible + .track{outline:2px solid var(--acc);outline
 
     <div class="switches">
       <label class="sw">
+        <div><div class="t">Loop-Record</div><div class="d">Hauptschalter: aus = keinerlei Automatik</div></div>
+        <input type="checkbox" id="sw_loop_record" onchange="setFlag('loop_record',this.checked)">
+        <span class="track" id="tr_loop_record"></span>
+      </label>
+      <label class="sw">
         <div><div class="t">Auto-Record</div><div class="d">Startet die Aufnahme neu, wenn das Deck steht</div></div>
         <input type="checkbox" id="sw_auto_record" onchange="setFlag('auto_record',this.checked)">
         <span class="track" id="tr_auto_record"></span>
@@ -865,6 +1162,34 @@ input[type=checkbox]:focus-visible + .track{outline:2px solid var(--acc);outline
         <input type="checkbox" id="sw_sync_timecode" onchange="setFlag('sync_timecode',this.checked)">
         <span class="track" id="tr_sync_timecode"></span>
       </label>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="eyebrow">Timer-Aufnahme</div>
+    <div class="switches" style="margin-top:0">
+      <label class="sw">
+        <div><div class="t">Timer aktiv</div><div class="d">Startet und stoppt zur eingestellten Uhrzeit</div></div>
+        <input type="checkbox" id="sw_timer_enabled" onchange="setFlag('timer_enabled',this.checked)">
+        <span class="track" id="tr_timer_enabled"></span>
+      </label>
+      <div class="sw">
+        <div><div class="t">Anzahl Zeitpläne</div><div class="d">1 bis 3 Einträge</div></div>
+        <select id="timerCount" onchange="setCount(this.value)"
+                style="background:#0c0e13;border:1px solid var(--line);color:var(--txt);
+                       border-radius:9px;padding:8px 10px;font:inherit;font-family:var(--mono)">
+          <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="hint" id="timerState" style="margin-top:14px">Timer aus</div>
+    <div id="timerRows"></div>
+
+    <div class="row">
+      <button onclick="saveTimers()">Zeitpläne speichern</button>
+      <button class="b-ghost b-sm" onclick="discardTimers()">Verwerfen</button>
+      <span class="hint" id="timerHint">Uhrzeiten wirken sofort nach dem Speichern.</span>
     </div>
   </div>
 
@@ -912,17 +1237,18 @@ input[type=checkbox]:focus-visible + .track{outline:2px solid var(--acc);outline
   <div class="panel">
     <div class="eyebrow">Ereignisse</div>
     <div class="log" id="log"></div>
-    <div class="hint" id="foot">Oberfläche 2.1</div>
+    <div class="hint" id="foot">HyperDeck Web Control v{{APP_VERSION}}</div>
   </div>
 
 </div>
 
 <script>
-var UI_VERSION = '2.1';
 var $ = function(id){ return document.getElementById(id); };
-var dirty = {};
-var lastLogLen = -1;
+var dirty = {};          // vom Benutzer angefasste Felder nicht ueberschreiben
+var timerDirty = false;  // ungespeicherte Aenderung an den Zeitplaenen
+var logSeq = 0;          // zuletzt empfangene Log-Zeile
 var lastInterval = 60;
+var DAYS = ['Mo','Di','Mi','Do','Fr','Sa','So'];
 
 // Countdown laeuft lokal weiter, damit er auch zwischen zwei Serverantworten tickt
 var cdValue = null;
@@ -966,6 +1292,116 @@ async function setFlag(key, value){
 async function formatSlot(id){
   if (!confirm('Slot ' + id + ' wirklich formatieren? Alle Aufnahmen auf dieser Karte gehen verloren.')) return;
   await send('format', { slot_id: id });
+}
+
+/* ---------- Zeitplaene ------------------------------------------------ */
+
+function buildTimerRows(){
+  var html = '';
+  for (var i = 0; i < 3; i++){
+    var d = '';
+    for (var k = 0; k < 7; k++){
+      d += '<button type="button" class="day" id="t' + i + '_d' + k +
+           '" onclick="toggleDay(' + i + ',' + k + ')">' + DAYS[k] + '</button>';
+    }
+    html +=
+      '<div class="trow" id="trow' + i + '" hidden>' +
+        '<div class="trow-head">' +
+          '<div><div class="trow-name">Autorecord ' + (i + 1) + '</div>' +
+          '<div class="trow-sum" id="t' + i + '_sum"></div></div>' +
+          '<label class="toggle-mini">aktiv' +
+            '<input type="checkbox" id="t' + i + '_on" onchange="timerTouched()">' +
+            '<span class="track" id="t' + i + '_tr"></span>' +
+          '</label>' +
+        '</div>' +
+        '<div class="days">' + d + '</div>' +
+        '<div class="times">' +
+          '<div class="field"><label for="t' + i + '_start">Start</label>' +
+            '<input type="time" id="t' + i + '_start" onchange="timerTouched()"></div>' +
+          '<div class="field"><label for="t' + i + '_end">Ende</label>' +
+            '<input type="time" id="t' + i + '_end" onchange="timerTouched()"></div>' +
+        '</div>' +
+      '</div>';
+  }
+  $('timerRows').innerHTML = html;
+}
+
+function toggleDay(i, k){
+  var el = $('t' + i + '_d' + k);
+  el.className = (el.className.indexOf('on') >= 0) ? 'day' : 'day on';
+  timerTouched();
+}
+
+function timerTouched(){
+  timerDirty = true;
+  $('timerHint').textContent = 'Nicht gespeichert - auf "Zeitpläne speichern" klicken.';
+  for (var i = 0; i < 3; i++){ paintRow(i); }
+}
+
+function paintRow(i){
+  var on = $('t' + i + '_on').checked;
+  $('t' + i + '_tr').className = on ? 'track on' : 'track';
+  $('trow' + i).className = on ? 'trow' : 'trow off';
+  var days = [];
+  for (var k = 0; k < 7; k++){
+    if ($('t' + i + '_d' + k).className.indexOf('on') >= 0) days.push(DAYS[k]);
+  }
+  var s = $('t' + i + '_start').value, e = $('t' + i + '_end').value;
+  var over = (s && e && e <= s) ? ' (über Mitternacht)' : '';
+  $('t' + i + '_sum').textContent = !on ? 'ausgeschaltet'
+    : (!days.length ? 'kein Wochentag gewählt'
+    : days.join(' ') + ' · ' + s + '–' + e + ' Uhr' + over);
+}
+
+function fillTimers(d){
+  var count = num(d.timer_count) || 1;
+  for (var i = 0; i < 3; i++){ $('trow' + i).hidden = (i >= count); }
+  if (document.activeElement !== $('timerCount')) $('timerCount').value = count;
+  if (timerDirty) return;                       // Eingaben nicht ueberschreiben
+  var list = d.timers || [];
+  for (var j = 0; j < 3; j++){
+    var t = list[j] || {};
+    $('t' + j + '_on').checked = !!t.enabled;
+    if (document.activeElement !== $('t' + j + '_start')) $('t' + j + '_start').value = t.start || '';
+    if (document.activeElement !== $('t' + j + '_end')) $('t' + j + '_end').value = t.end || '';
+    var days = t.days || [];
+    for (var k = 0; k < 7; k++){
+      $('t' + j + '_d' + k).className = (days.indexOf(k) >= 0) ? 'day on' : 'day';
+    }
+    paintRow(j);
+  }
+}
+
+async function setCount(value){
+  await api('/api/settings', { timer_count: value });
+  refresh();
+}
+
+async function saveTimers(){
+  var list = [];
+  for (var i = 0; i < 3; i++){
+    var days = [];
+    for (var k = 0; k < 7; k++){
+      if ($('t' + i + '_d' + k).className.indexOf('on') >= 0) days.push(k);
+    }
+    list.push({
+      enabled: $('t' + i + '_on').checked,
+      days: days,
+      start: $('t' + i + '_start').value || '00:00',
+      end: $('t' + i + '_end').value || '00:00'
+    });
+  }
+  await api('/api/settings', { timers: list, timer_count: $('timerCount').value });
+  timerDirty = false;
+  $('timerHint').textContent = 'Gespeichert.';
+  setTimeout(function(){ $('timerHint').textContent = 'Uhrzeiten wirken sofort nach dem Speichern.'; }, 4000);
+  refresh();
+}
+
+function discardTimers(){
+  timerDirty = false;
+  $('timerHint').textContent = 'Änderungen verworfen.';
+  refresh();
 }
 
 async function saveSettings(){
@@ -1038,17 +1474,20 @@ function renderSlots(d){
   $('slots').innerHTML = html;
 }
 
-function renderLog(logs){
-  if (logs.length === lastLogLen) return;
-  lastLogLen = logs.length;
+function renderLog(d){
+  var logs = d.logs || [];
   var box = $('log');
+  if (d.log_reset) box.innerHTML = '';
+  if (typeof d.log_seq === 'number') logSeq = d.log_seq;
+  if (!logs.length) return;
   var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
   var html = '';
   for (var i = 0; i < logs.length; i++){
     html += '<div><span class="t">' + esc(logs[i].time) + '</span> <span class="' +
       esc(logs[i].level) + '">' + esc(logs[i].msg) + '</span></div>';
   }
-  box.innerHTML = html;
+  box.insertAdjacentHTML('beforeend', html);   // nur die neuen Zeilen anhaengen
+  while (box.childElementCount > 250) box.removeChild(box.firstElementChild);
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
@@ -1071,7 +1510,7 @@ function paintCountdown(){
 async function refresh(){
   var d;
   try {
-    d = await api('/api/status');
+    d = await api('/api/status?since=' + logSeq);
   } catch (e){
     $('dot').className = 'dot off';
     $('linkTxt').textContent = 'Webserver nicht erreichbar';
@@ -1079,6 +1518,7 @@ async function refresh(){
   }
 
   $('device').textContent = d.device || 'HyperDeck Control';
+  if (d.app_version) $('ver').textContent = 'v' + d.app_version;
   $('host').textContent = d.deck_ip + ':' + d.deck_port;
   $('dot').className = 'dot ' + (d.connected ? 'on' : 'off');
   $('linkTxt').textContent = d.connected ? 'verbunden' : 'keine Verbindung';
@@ -1101,9 +1541,12 @@ async function refresh(){
   paintCountdown();
   $('lastPoll').textContent = d.last_poll ? ('zuletzt ' + d.last_poll) : '';
 
-  var stale = d.ui_version && d.ui_version !== UI_VERSION;
-  $('noticeStale').hidden = !stale;
-  $('foot').textContent = 'Oberfläche ' + UI_VERSION + ' · Dienst ' + (d.ui_version || '?');
+  $('foot').textContent = 'HyperDeck Web Control v' + (d.app_version || '?') +
+    ' · Deck ' + d.deck_ip + ':' + d.deck_port;
+
+  $('timerState').textContent = d.timer_info || 'Timer aus';
+  $('noticeTimer').hidden = !d.timer_active;
+  $('timerTxt').textContent = d.timer_info || '';
 
   $('noticeLock').hidden = !d.manual_stop;
   $('noticeBusy').hidden = !d.busy;
@@ -1114,9 +1557,22 @@ async function refresh(){
 
   renderSlots(d);
 
+  setSwitch('loop_record', d.loop_record);
   setSwitch('auto_record', d.auto_record);
   setSwitch('auto_loop', d.auto_loop);
   setSwitch('sync_timecode', d.sync_timecode);
+  setSwitch('timer_enabled', d.timer_enabled);
+
+  // Die Unterschalter haengen am Hauptschalter Loop-Record
+  var lr = !!d.loop_record;
+  ['auto_record','auto_loop'].forEach(function(key){
+    var box = $('sw_' + key);
+    box.disabled = !lr;
+    var row = box.parentNode;
+    if (row && row.style) row.style.opacity = lr ? '' : '.45';
+  });
+
+  fillTimers(d);
 
   fillField('f_deck_ip', 'deck_ip', d.deck_ip);
   fillField('f_deck_port', 'deck_port', d.deck_port);
@@ -1126,9 +1582,10 @@ async function refresh(){
   fillField('f_format_filesystem', 'format_filesystem', d.format_filesystem);
   fillField('f_format_name', 'format_name', d.format_name);
 
-  renderLog(d.logs || []);
+  renderLog(d);
 }
 
+buildTimerRows();
 setInterval(function(){ if (!document.hidden) refresh(); }, 1000);
 setInterval(function(){ if (!document.hidden) paintCountdown(); }, 250);
 refresh();
@@ -1150,9 +1607,19 @@ def no_cache(response):
     return response
 
 
+_page_cache = {"html": None}
+
+
+def render_page():
+    """Version einmalig in die Seite einsetzen - eine einzige Quelle der Wahrheit."""
+    if _page_cache["html"] is None:
+        _page_cache["html"] = HTML_PAGE.replace("{{APP_VERSION}}", APP_VERSION)
+    return _page_cache["html"]
+
+
 @app.route("/")
 def index():
-    return Response(HTML_PAGE, mimetype="text/html")
+    return Response(render_page(), mimetype="text/html")
 
 
 @app.route("/favicon.ico")
@@ -1164,12 +1631,30 @@ def favicon():
 def api_status():
     with _state_lock:
         snapshot = copy.deepcopy(STATE)
-    with _log_lock:
-        logs = list(_logs)
-    payload = dict(get_settings())
+    payload = get_settings()
     payload.update(snapshot)
-    payload["logs"] = logs
-    payload["ui_version"] = UI_VERSION
+
+    # Log nur als Nachschub liefern: der Browser fragt im Sekundentakt und soll
+    # nicht jedes Mal 250 Zeilen erneut uebertragen bekommen.
+    with _log_lock:
+        entries = list(_logs)
+    newest = entries[-1]["id"] if entries else 0
+    oldest = entries[0]["id"] if entries else 0
+    reset = True
+    since_raw = request.args.get("since")
+    if since_raw is not None:
+        try:
+            since = int(since_raw)
+        except (TypeError, ValueError):
+            since = -1
+        if oldest - 1 <= since <= newest:
+            entries = [e for e in entries if e["id"] > since]
+            reset = False
+
+    payload["logs"] = entries
+    payload["log_seq"] = newest
+    payload["log_reset"] = reset
+    payload["app_version"] = APP_VERSION
     return jsonify(payload)
 
 
@@ -1191,13 +1676,25 @@ def api_command():
     return jsonify(ok=True)
 
 
+def describe_change(key, value):
+    """Kurztext fuers Log - die Timer-Liste wuerde sonst das Log zumuellen."""
+    if key == "timers":
+        parts = []
+        for index, entry in enumerate(value):
+            if entry["enabled"]:
+                parts.append("%d: %s %s-%s" % (index + 1, describe_days(entry["days"]),
+                                               entry["start"], entry["end"]))
+        return "Zeitpläne [%s]" % ("; ".join(parts) if parts else "keiner aktiv")
+    return "%s=%s" % (key, value)
+
+
 @app.route("/api/settings", methods=["POST"])
 def api_settings():
     data = request.get_json(silent=True) or {}
     changed = update_settings(data)
     if changed:
         log("Einstellungen geändert: %s"
-            % ", ".join("%s=%s" % (k, v) for k, v in sorted(changed.items())))
+            % ", ".join(describe_change(k, v) for k, v in sorted(changed.items())))
         if "deck_ip" in changed or "deck_port" in changed:
             jobs.put({"action": "reconnect"})
         else:
@@ -1216,6 +1713,9 @@ def main():
     parser.add_argument("--interval", type=int, help="Abfrageintervall in Sekunden")
     parser.add_argument("--web-port", type=int, default=5000, help="Port der Weboberflaeche")
     parser.add_argument("--bind", default="0.0.0.0", help="Adresse, auf der der Webserver lauscht")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="Browser beim Start nicht automatisch oeffnen")
+    parser.add_argument("--version", action="version", version="HyperDeck Web Control " + APP_VERSION)
     args = parser.parse_args()
 
     load_config()
@@ -1233,13 +1733,26 @@ def main():
     worker.start()
 
     cfg = get_settings()
+    url = "http://localhost:%d" % args.web_port
     print("")
-    print("=" * 58)
-    print("  HYPERDECK WEB CONTROL")
+    print("=" * 62)
+    print("  HYPERDECK WEB CONTROL  v%s" % APP_VERSION)
     print("  Deck:    %s:%d" % (cfg["deck_ip"], cfg["deck_port"]))
-    print("  Browser: http://localhost:%d  (oder LAN-IP dieses Rechners)" % args.web_port)
-    print("=" * 58)
+    print("  Browser: %s  (oder LAN-IP dieses Rechners)" % url)
+    print("  Loop-Record: %s   Timer: %s" % (
+        "ein" if cfg["loop_record"] else "aus",
+        "ein" if cfg["timer_enabled"] else "aus"))
+    for index, entry in enumerate(cfg["timers"][:cfg["timer_count"]]):
+        print("    Autorecord %d: %s  %s-%s Uhr  [%s]" % (
+            index + 1, describe_days(entry["days"]), entry["start"], entry["end"],
+            "aktiv" if entry["enabled"] else "aus"))
+    print("=" * 62)
+    print("  Dieses Fenster bitte offen lassen. Beenden mit Strg + C.")
+    print("=" * 62)
     print("")
+
+    if not args.no_browser:
+        open_browser_later(url)
 
     try:
         app.run(host=args.bind, port=args.web_port, threaded=True,
@@ -1249,5 +1762,40 @@ def main():
         deck.close()
 
 
+def open_browser_later(url, delay=1.5):
+    """Oeffnet die Oberflaeche, sobald der Webserver oben ist."""
+    def worker():
+        time.sleep(delay)
+        try:
+            webbrowser.open_new_tab(url)
+            log("Browser wurde mit %s geoeffnet." % url)
+        except Exception as exc:
+            log("Browser konnte nicht geoeffnet werden (%s) - bitte %s manuell aufrufen."
+                % (exc, url), "warn")
+    threading.Thread(target=worker, name="browser-opener", daemon=True).start()
+
+
+def pause_before_exit():
+    """Haelt ein doppelt angeklicktes Konsolenfenster offen, damit die
+    Fehlermeldung lesbar bleibt. start.bat setzt HYPERDECK_NO_PAUSE=1."""
+    if os.environ.get("HYPERDECK_NO_PAUSE"):
+        return
+    try:
+        if sys.stdin is None or not sys.stdin.isatty():
+            return
+        input("\nZum Schliessen dieses Fensters die Eingabetaste druecken ... ")
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nBeendet.")
+    except Exception:
+        traceback.print_exc()
+        print("")
+        print("!!! Der Dienst wurde wegen des oben genannten Fehlers beendet. !!!")
+        pause_before_exit()
+        sys.exit(1)

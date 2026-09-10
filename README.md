@@ -5,6 +5,7 @@ Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Autom
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue?logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/WebUI-Flask-black?logo=flask&logoColor=white)
 ![Hardware](https://img.shields.io/badge/Hardware-BM%20HyperDeck-red)
+![Version](https://img.shields.io/badge/Version-3.0.0-blueviolet)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 ---
@@ -14,12 +15,15 @@ Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Autom
 1. [Überblick & Einsatzzwecke](#-überblick--einsatzzwecke)
 2. [Hauptfunktionen](#-hauptfunktionen)
 3. [Architektur & Stabilität](#️-architektur--stabilität)
-4. [Aufruf der Weboberfläche](#-aufruf-der-weboberfläche)
-5. [Übersicht der Web-UI & Einstellungen](#️-übersicht-der-web-ui--einstellungen)
-6. [CLI-Startparameter](#️-cli-startparameter)
-7. [REST-API Dokumentation](#-rest-api-dokumentation)
-8. [Fehlerbehebung (Troubleshooting)](#-fehlerbehebung-troubleshooting)
-9. [Lizenz](#-lizenz)
+4. [Installation & Schnellstart](#-installation--schnellstart)
+5. [Aufruf der Weboberfläche](#-aufruf-der-weboberfläche)
+6. [Übersicht der Web-UI & Einstellungen](#️-übersicht-der-web-ui--einstellungen)
+7. [Timer-Aufnahme (Zeitsteuerung)](#-timer-aufnahme-zeitsteuerung)
+8. [CLI-Startparameter](#️-cli-startparameter)
+9. [REST-API Dokumentation](#-rest-api-dokumentation)
+10. [Fehlerbehebung (Troubleshooting)](#-fehlerbehebung-troubleshooting)
+11. [Versionierung & Änderungsprotokoll](#-versionierung--änderungsprotokoll)
+12. [Lizenz](#-lizenz)
 
 ---
 
@@ -38,11 +42,15 @@ Standardmäßig stoppt ein Blackmagic HyperDeck die Aufnahme, sobald beide einge
 
 * 🔄 **Intelligenter Auto-Loop:** Erkennt, wenn die aktive Karte unter den eingestellten Schwellenwert fällt (z. B. `< 5 Min.`), und formatiert die inaktive Karte rechtzeitig vor dem automatischen Slot-Wechsel.
 * 🔴 **Auto-Record:** Startet die Aufnahme selbstständig neu, falls das Gerät steht (z. B. nach Signalverlust oder Stromausfall).
+* 🎚️ **Hauptschalter „Loop-Record“:** Schaltet die komplette Endlos-Automatik mit einem Klick aus – das Werkzeug wird dann zur reinen Fernbedienung.
+* ⏰ **Timer-Aufnahme:** Bis zu drei Zeitpläne mit Wochentagen und Uhrzeiten (Vorgabe **Mo–Fr 08:45–18:30 Uhr**). Der Rekorder startet und stoppt ohne Zutun, auch über Mitternacht hinweg.
 * 🔒 **Manueller Stopp-Schutz (Safety Interlock):** Drückt ein Operator manuell auf „Stopp“, verriegelt sich Auto-Record. Die Automatik funkt nicht eigenmächtig dazwischen, bis sie explizit freigegeben oder eine neue Aufnahme gestartet wird.
 * 🕒 **Timecode-Synchronisation:** Setzt den Start-Timecode des Decks auf Wunsch automatisch auf die aktuelle PC-Systemzeit (`HH:MM:SS:00`).
 * ⚡ **BM-Token-Formatierung:** Vollständige Unterstützung des zweistufigen Blackmagic-Protokolls (`prepare` $\rightarrow$ `Token auslesen` $\rightarrow$ `confirm`) inklusive 180-Sekunden-Cooldown gegen Mehrfach-Löschungen.
 * 🌐 **Responsives Dark-Mode Webinterface:** Timecode, Tally, Füllstandsbalken, Live-Countdown und Systemlog synchronisieren sich verzögerungsfrei und flüssig im Browser.
 * 💾 **Live-Konfiguration:** Alle Parameter sind im laufenden Betrieb in der Web-UI änderbar und werden persistent in `hyperdeck_config.json` gespeichert.
+* 🚀 **Startet und öffnet sich selbst:** `start.bat` (Windows) bzw. `start.sh` prüft Python, installiert die Abhängigkeiten und startet den Dienst – der Browser geht automatisch mit der richtigen Adresse auf. Das Konsolenfenster bleibt in jedem Fall offen.
+* 🏷️ **Sichtbare Version:** Die laufende Programmversion steht in der Kopf- und Fußzeile der Oberfläche sowie in der Startmeldung der Konsole.
 
 ---
 
@@ -102,12 +110,30 @@ pip install flask
 
 ### 3. Skript starten
 
+**Der bequeme Weg (empfohlen):**
+
+| System | Datei | Was passiert |
+| --- | --- | --- |
+| Windows | **`start.bat` doppelklicken** | Python wird gesucht, `flask` installiert, der Dienst gestartet, der Browser geöffnet. |
+| Linux / macOS | `./start.sh` | dasselbe im Terminal |
+
+Das Fenster **bleibt offen** und zeigt fortlaufend alle Meldungen an – auch dann,
+wenn etwas schiefgeht (z. B. fehlendes Python oder belegter Port). Erst ein
+Tastendruck schließt es. Beenden des Dienstes mit `Strg + C`.
+
+> Der Web-Port lässt sich in `start.bat` in der Zeile `set "WEBPORT=5000"` ändern.
+
+**Der klassische Weg:**
+
 ```bash
-# Standardstart
+# Standardstart (öffnet den Browser automatisch)
 python hyperdeck_control.py
 
 # Optional: IP-Adresse und Web-Port direkt beim Start übergeben
 python hyperdeck_control.py --ip 172.17.100.119 --web-port 5000
+
+# Ohne automatischen Browserstart (z. B. auf einem Server)
+python hyperdeck_control.py --no-browser
 ```
 
 ---
@@ -159,9 +185,11 @@ Die Weboberfläche ist in funktionale Bereiche gegliedert:
 
 | Schalter | Funktion |
 | --- | --- |
+| **Loop-Record** | **Hauptschalter.** Aus = keinerlei Automatik; Auto-Record und Auto-Loop werden gesperrt und ausgegraut. |
 | **Auto-Record** | Startet die Aufnahme automatisch, sobald das Deck steht. |
 | **Auto-Loop** | Formatiert die inaktive Karte rechtzeitig vor Kartenüberlauf. |
 | **Timecode auf Uhrzeit** | Synchronisiert den Startzeitcode mit der PC-Systemzeit (`HH:MM:SS:00`). |
+| **Timer aktiv** | Schaltet die Zeitsteuerung scharf (siehe nächster Abschnitt). |
 
 ### 5. Parameter-Konfiguration (mit Speicher-Button)
 
@@ -176,6 +204,49 @@ Die Weboberfläche ist in funktionale Bereiche gegliedert:
 | **Datenträgername** | `LoopDump` | Name der SD-Karte / SSD nach der Formatierung. |
 
 > 💡 Alle Eingaben werden persistent in der Datei `hyperdeck_config.json` gesichert und bleiben bei einem Neustart erhalten.
+
+---
+
+## ⏰ Timer-Aufnahme (Zeitsteuerung)
+
+Das Panel **Timer-Aufnahme** nimmt bis zu drei Zeitpläne auf („Autorecord 1“ bis
+„Autorecord 3“). Ist der Schalter **Timer aktiv** an, startet und stoppt der
+Rekorder vollautomatisch zur eingestellten Uhrzeit – niemand muss vor Ort sein.
+
+| Bedienelement | Bedeutung |
+| --- | --- |
+| **Timer aktiv** | Hauptschalter der Zeitsteuerung. |
+| **Anzahl Zeitpläne** | 1 bis 3. Es werden genau so viele Zeilen eingeblendet. |
+| **aktiv** (je Zeile) | Einzelnen Zeitplan ein- oder ausschalten, ohne ihn zu löschen. |
+| **Mo … So** | Wochentage anklicken, an denen dieser Zeitplan gelten soll. |
+| **Start / Ende** | Uhrzeiten im 24-Stunden-Format. |
+| **Zeitpläne speichern** | Übernimmt die Zeilen. Vorher erscheint der Hinweis „Nicht gespeichert“. |
+| **Verwerfen** | Holt den gespeicherten Stand zurück. |
+
+**Voreinstellung:** Autorecord 1 = Mo–Fr, **08:45 bis 18:30 Uhr**.
+
+Die Statuszeile über den Zeilen zeigt immer den aktuellen Stand, z. B.
+`Autorecord 1 nimmt auf, Fenster bis 18:30 Uhr` oder
+`Naechster Start: Autorecord 1 morgen um 08:45 Uhr`. Läuft ein Fenster, erscheint
+zusätzlich oben ein grüner Hinweisbalken.
+
+### Verhalten im Detail
+
+- **Über Mitternacht:** Ist die Endzeit kleiner als die Startzeit (z. B.
+  `22:00`–`06:00`), läuft das Fenster über den Tageswechsel. Maßgeblich ist der
+  Wochentag des **Starts**.
+- **Vorrang:** Bei scharfem Timer entscheidet allein der Zeitplan über Start und
+  Stopp. Auto-Record funkt nicht dazwischen und kann den Timer-Stopp nicht
+  überrennen. Auto-Loop (Kartenwechsel) arbeitet währenddessen normal weiter.
+- **Ausfallsicher:** Bricht die Verbindung ab oder startet der PC neu, prüft der
+  Dienst beim Verbinden erneut, ob gerade ein Fenster läuft, und nimmt die
+  Aufnahme wieder auf. Ein verpasster Stopp wird bis zu fünf Minuten lang
+  nachgeholt.
+- **Manueller Stopp:** Drückt jemand während eines Fensters auf „Aufnahme
+  stoppen“, bleibt es gestoppt – der **nächste** Termin startet aber wieder
+  ganz normal.
+- **Mehrere Zeitpläne** dürfen sich denselben Tag teilen (z. B. 08:45–12:00 und
+  14:00–18:30). Der erste passende Zeitplan gewinnt.
 
 ---
 
@@ -194,6 +265,8 @@ python hyperdeck_control.py [OPTIONEN]
 | `--interval` | Int | `20` | Abfrageintervall in Sekunden |
 | `--web-port` | Int | `5000` | Lokaler Port für das Webinterface |
 | `--bind` | String | `0.0.0.0` | Netzwerk-Bind-Adresse des Webservers |
+| `--no-browser` | Flag | aus | Browser beim Start **nicht** automatisch öffnen |
+| `--version` | Flag | – | Gibt die Programmversion aus und beendet sich |
 
 ---
 
@@ -207,7 +280,22 @@ Zur Integration in Steuerungen wie Bitfocus Companion, Stream Deck, Node-RED ode
 GET /api/status
 ```
 
-Gibt Gerätedaten, Timecode, Slots, Schalterzustände und Logs als JSON zurück.
+Gibt Gerätedaten, Timecode, Slots, Schalterzustände, Zeitpläne, die Version
+(`app_version`) und das Log als JSON zurück.
+
+Mit `?since=<log_seq>` werden nur die **neuen** Log-Zeilen geliefert – so bleibt
+die Sekundenabfrage sparsam:
+
+```http
+GET /api/status?since=42
+```
+
+| Feld | Bedeutung |
+| --- | --- |
+| `log_seq` | Nummer der neuesten Log-Zeile – beim nächsten Aufruf als `since` mitgeben |
+| `log_reset` | `true` = der Client muss sein Log leeren (z. B. nach einem Neustart des Dienstes) |
+| `timer_active` | Nummer (1–3) des laufenden Zeitplans, sonst `null` |
+| `timer_info` | Klartext für die Anzeige |
 
 ### 2. Befehl senden
 
@@ -243,11 +331,30 @@ POST /api/settings
 
 ```json
 {
+  "loop_record": true,
   "auto_record": true,
   "check_interval": 30,
   "min_remaining_threshold": 8
 }
 ```
+
+Zeitpläne setzen (die Liste enthält immer alle drei Einträge, `days`: 0 = Montag
+… 6 = Sonntag):
+
+```json
+{
+  "timer_enabled": true,
+  "timer_count": 2,
+  "timers": [
+    {"enabled": true,  "days": [0,1,2,3,4], "start": "08:45", "end": "18:30"},
+    {"enabled": true,  "days": [5,6],       "start": "10:00", "end": "12:00"},
+    {"enabled": false, "days": [],          "start": "08:45", "end": "18:30"}
+  ]
+}
+```
+
+> Alle Werte werden serverseitig geprüft und normalisiert: aus `"8:45"` wird
+> `"08:45"`, unsinnige Angaben fallen auf die Vorgabe zurück.
 
 ---
 
@@ -259,10 +366,38 @@ POST /api/settings
 | Befehl abgelehnt (Code 111) | Fernsteuerung am Deck deaktiviert. | Am HyperDeck die Taste „REMOTE" drücken (muss leuchten). |
 | Formatierung schlägt fehl | Keine Karte eingelegt oder beschädigt. | Überprüfen, ob die Karte gemountet ist. Gegebenenfalls am PC formatieren. |
 | Aufnahme startet nicht automatisch | Manueller Stopp aktiv. | In der UI auf „Auto-Record freigeben" oder „Aufnahme starten" klicken. |
+| Timer startet nicht | Timer nicht scharf, falscher Wochentag, oder die Zeile ist über „Anzahl Zeitpläne" ausgeblendet. | Statuszeile im Timer-Panel lesen – dort steht, was als Nächstes passiert. |
+| Timer stoppt nicht | Ein zweiter Zeitplan überlappt das Fenster. | Zeitpläne auf Überschneidungen prüfen. |
+| Fenster schließt sich sofort | Python fehlt oder ist nicht im PATH. | `start.bat` benutzen – es zeigt die Ursache an und bleibt offen. |
+| Uhrzeitfelder zeigen AM/PM | Anzeigeformat des Browsers/Systems. | Nur die Anzeige, gespeichert wird immer 24-Stunden-Zeit. Systemsprache auf Deutsch stellen. |
+
+---
+
+## 🔖 Versionierung & Änderungsprotokoll
+
+Das Projekt folgt der [Semantischen Versionierung](https://semver.org/lang/de/)
+(**MAJOR.MINOR.PATCH**). Die laufende Version steht
+
+- oben rechts in der Kopfzeile der Weboberfläche (z. B. `v3.0.0`),
+- in der Fußzeile unter dem Ereignis-Log,
+- in der Startmeldung des Konsolenfensters,
+- in `hyperdeck_control.py` in der Konstanten `APP_VERSION`,
+- und über die API unter `app_version`.
+
+Alle Änderungen sind im **[Änderungsprotokoll](CHANGELOG.md)** festgehalten.
+
+Bei einer neuen Version zusätzlich auf GitHub einen Tag und ein Release anlegen –
+dann ist die Version auch dort sichtbar und herunterladbar:
+
+```bash
+git tag -a v3.0.0 -m "Timer-Aufnahme, Loop-Hauptschalter, Autostart"
+git push origin v3.0.0
+```
 
 ---
 
 ## 📄 Lizenz
 
-Dieses Projekt ist unter der **MIT-Lizenz** lizenziert. Freie Nutzung, Anpassung und Weitergabe sind ausdrücklich gestattet.
+Dieses Projekt steht unter der **MIT-Lizenz** – siehe [LICENSE](LICENSE).
+Freie Nutzung, Anpassung und Weitergabe sind ausdrücklich gestattet.
 ```

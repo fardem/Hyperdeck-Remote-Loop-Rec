@@ -430,6 +430,31 @@ es trotzdem nicht mag (sehr schwaches WLAN, Deck mit alter Firmware), schaltet
 > und stoßen die Automatik an – die Meldungen dazwischen aktualisieren still
 > die Anzeige.
 
+### Wenn der Timecode trotzdem nicht mitläuft
+
+Das Protokoll legt nicht eindeutig fest, unter welchem Antwortcode ein Gerät
+Timecode-Meldungen schickt (dokumentiert sind `500`, `502`, `508`, `510`,
+`511`, `519`, `520`). Deshalb wertet das Programm **jede** Meldung aus, in der
+ein Timecode steht, und schreibt einen unbekannten Code einmal ins Log:
+
+```text
+Deck meldet unbekannt: 513 display timecode [display timecode, timecode] - der Timecode daraus wird benutzt.
+```
+
+Nach dem Abonnieren fragt das Programm das Deck außerdem, was es nun
+tatsächlich meldet, und schreibt die Antwort ins Log:
+
+```text
+Deck meldet laut eigener Auskunft: transport: true; slot: true; display timecode: true
+```
+
+Steht dort `display timecode: false`, hat das Gerät den Wunsch stillschweigend
+abgelehnt – dann sagt das Log es ausdrücklich. Und der Schalter behauptet nicht
+mehr, der Strom liefe: **„Läuft"** steht nur dort, wenn in den letzten fünf
+Sekunden wirklich Meldungen ankamen; sonst **„Eingeschaltet, aber das Deck
+schickt nichts"**. In beiden Fällen folgt die Anzeige weiter der
+Kontrollabfrage – ein kleiner Wert dort lässt den Timecode dann flüssig laufen.
+
 ---
 
 ## ⌨️ CLI-Startparameter

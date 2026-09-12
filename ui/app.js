@@ -515,7 +515,9 @@ async function refresh(){
   setSwitch('timecode_live', d.timecode_live);
   $('tcLiveHint').textContent = d.timecode_stream
     ? 'Läuft – das Deck schickt den Timecode im Bildtakt (etwa 16 kB/s)'
-    : 'Das Deck schickt den Timecode laufend statt nur bei der Kontrollabfrage';
+    : (d.timecode_live && d.connected
+        ? 'Eingeschaltet, aber das Deck schickt nichts – siehe Ereignisse'
+        : 'Das Deck schickt den Timecode laufend statt nur bei der Kontrollabfrage');
   setSwitch('backup_enabled', d.backup_enabled);
   setSwitch('backup_block_format', d.backup_block_format);
   $('autoRecHint').textContent = d.timer_enabled

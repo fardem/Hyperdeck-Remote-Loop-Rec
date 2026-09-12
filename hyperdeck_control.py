@@ -42,6 +42,7 @@ import logging
 import os
 import queue
 import re
+import select
 import socket
 import sys
 import threading
@@ -62,7 +63,7 @@ except ImportError:
 # Konfiguration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "3.1.1"       # wird in der Web-Oberflaeche und im Log angezeigt
+APP_VERSION = "3.2.0"       # wird in der Web-Oberflaeche und im Log angezeigt
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # Ablage fuer Konfiguration und Logdatei. Ueber die Umgebungsvariable
 # HYPERDECK_HOME laesst sich ein anderer Ordner waehlen - z. B. fuer eine
@@ -162,6 +163,12 @@ LIMITS = {
     "backup_ftp_port": (1, 65535),
 }
 
+# Asynchrone Meldungen des Decks (Protokoll: "5xx {Text}:"). Sie kommen
+# unaufgefordert, sobald sie per "notify" abonniert sind.
+ASYNC_CONNECTION = 500      # 500 connection info  (Begruessung)
+ASYNC_SLOT = 502            # 502 slot info        (Karte gewechselt, Restzeit)
+ASYNC_TRANSPORT = 508       # 508 transport info   (Aufnahme laeuft/steht)
+
 FORMAT_COOLDOWN_S = 180     # Sperre pro Slot nach einer Formatierung
 SLOT_POLL_MIN_S = 5         # Kartenstatus hoechstens so oft abfragen
 AUTORECORD_RETRY_S = 10     # Mindestabstand zwischen zwei Auto-Record-Versuchen
@@ -216,6 +223,7 @@ STATE = {
     "last_format": {"1": "", "2": ""},
     "timer_active": None,       # Nummer (1..3) des laufenden Zeitfensters
     "timer_info": "Timer aus",  # Klartext fuer die Oberflaeche
+    "notify": False,            # Deck meldet Aenderungen von selbst
 }
 _state_lock = threading.RLock()
 
@@ -460,6 +468,7 @@ class HyperDeck(object):
         self.buffer = b""
         self.ip = None
         self.port = None
+        self.on_async = None        # Rueckruf fuer unaufgeforderte 5xx-Meldungen
 
     @property
     def connected(self):
@@ -531,8 +540,61 @@ class HyperDeck(object):
                         key, value = item.split(":", 1)
                         data[key.strip().lower()] = value.strip()
             if 500 <= code <= 599 and not allow_async:
-                continue  # asynchrone Statusmeldung, nicht unsere Antwort
+                # Unaufgeforderte Meldung mitten in einer Antwort: verarbeiten
+                # und weiterlesen, bis die eigentliche Antwort kommt.
+                self._deliver_async(DeckReply(code, header, data, lines))
+                continue
             return DeckReply(code, header, data, lines)
+
+    def _deliver_async(self, reply):
+        if self.on_async is None:
+            return
+        try:
+            self.on_async(reply)
+        except Exception as exc:                # darf nie den Leser sprengen
+            log("Fehler beim Verarbeiten einer Deck-Meldung: %s" % exc, "warn")
+
+    def pending(self, wait=0.0):
+        """True, wenn eine vollstaendige Zeile bereitliegt. Blockiert hoechstens
+        `wait` Sekunden und holt dabei neue Daten vom Socket."""
+        if b"\n" in self.buffer:
+            return True
+        if self.sock is None:
+            return False
+        try:
+            ready = select.select([self.sock], [], [], max(0.0, wait))[0]
+        except (OSError, ValueError):
+            return False
+        if not ready:
+            return False
+        try:
+            chunk = self.sock.recv(4096)
+        except socket.timeout:
+            return False
+        except OSError as exc:
+            raise DeckError("Socket-Fehler: %s" % exc)
+        if not chunk:
+            raise DeckError("Verbindung wurde vom Deck geschlossen")
+        self.buffer += chunk
+        return b"\n" in self.buffer
+
+    def pump(self, wait=0.25):
+        """Wartet auf unaufgeforderte Meldungen und verarbeitet sie. Ersetzt in
+        der Worker-Schleife das blosse Schlafen: liegt nichts an, wird die Zeit
+        abgewartet - kommt etwas, reagiert die Anzeige sofort."""
+        deadline = time.monotonic() + wait
+        seen = 0
+        while self.sock is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 and seen:
+                break
+            if not self.pending(max(0.0, remaining)):
+                break
+            reply = self._read_reply(timeout=5.0, allow_async=True)
+            if 500 <= reply.code <= 599:
+                self._deliver_async(reply)
+            seen += 1
+        return seen
 
     # ---- Schreiben -------------------------------------------------------
 
@@ -553,6 +615,8 @@ _format_cooldown = {1: 0.0, 2: 0.0}
 _last_autorecord_error = {"text": ""}
 _autorecord_next_try = [0.0]
 _last_slot_poll = [0.0]
+_async_seen = {"transport": False, "slot": False}
+_last_automation = [0.0]
 _format_name_supported = {"value": True}
 
 
@@ -708,36 +772,96 @@ def do_format(slot_id, manual=False):
 # Abfrage und Automatik
 # --------------------------------------------------------------------------
 
+def slot_from_data(slot_id, data, previous=None):
+    """Baut den Slot-Zustand aus einer Antwort. Fehlende Felder behalten ihren
+    alten Wert - asynchrone Meldungen enthalten nicht immer alles."""
+    info = dict(previous or {"id": slot_id, "status": "unknown",
+                             "remaining_min": 0, "volume": ""})
+    info["id"] = slot_id
+    if data.get("status"):
+        info["status"] = data["status"].lower()
+    if data.get("volume name") is not None:
+        info["volume"] = data.get("volume name") or ""
+    if data.get("recording time") is not None:
+        try:
+            info["remaining_min"] = int(float(data["recording time"])) // 60
+        except (TypeError, ValueError):
+            pass
+    return info
+
+
+def apply_slot(data):
+    """Uebernimmt eine Slot-Meldung (abgefragt oder unaufgefordert)."""
+    raw = (data.get("slot id") or "").strip()
+    if not raw.isdigit():
+        return None
+    slot_id = int(raw)
+    with _state_lock:
+        slots = copy.deepcopy(STATE["slots"])
+        previous = next((s for s in slots if s["id"] == slot_id), None)
+        info = slot_from_data(slot_id, data, previous)
+        slots = [s for s in slots if s["id"] != slot_id] + [info]
+        STATE["slots"] = sorted(slots, key=lambda s: s["id"])
+    return info
+
+
+def apply_transport(data):
+    """Uebernimmt eine Transport-Meldung (abgefragt oder unaufgefordert)."""
+    status = (data.get("status") or "unbekannt").lower()
+    timecode = data.get("timecode") or data.get("display timecode") or "--:--:--:--"
+    raw_slot = (data.get("slot id") or "").strip()
+    active = int(raw_slot) if raw_slot.isdigit() and raw_slot != "0" else None
+    set_state(status=status, timecode=timecode, active_slot=active)
+    return status, active
+
+
+def handle_async(reply):
+    """Wird vom Leser aufgerufen, wenn das Deck von sich aus etwas meldet.
+    Hier wird nur der Zustand nachgezogen - die Automatik laeuft danach in der
+    Worker-Schleife, damit sich kein Befehl in einen anderen verschachtelt."""
+    if reply.code == ASYNC_TRANSPORT:
+        status, _active = apply_transport(reply.data)
+        _async_seen["transport"] = True
+        log_throttled("async-transport-%s" % status,
+                      "Deck meldet: %s" % status, period=5)
+    elif reply.code == ASYNC_SLOT:
+        info = apply_slot(reply.data)
+        if info is not None:
+            _async_seen["slot"] = True
+
+
+def enable_notifications():
+    """Abonniert die Meldungen des Decks. Klappt das nicht, wird weiter
+    abgefragt - die Automatik funktioniert in beiden Faellen."""
+    ok = True
+    for what in ("transport", "slot"):
+        reply = deck.command("notify: %s: true" % what)
+        if not reply.ok:
+            ok = False
+            log("Deck nimmt 'notify: %s' nicht an (%s%s) - es wird weiter "
+                "regelmaessig abgefragt." % (what, reply, reply.hint()), "warn")
+    set_state(notify=ok)
+    if ok:
+        log("Das Deck meldet Aenderungen ab jetzt von selbst.", "ok")
+    return ok
+
+
 def read_slot(slot_id):
     reply = deck.command("slot info: slot id: %d" % slot_id)
     if not reply.ok:
         return {"id": slot_id, "status": "empty", "remaining_min": 0, "volume": ""}
-    try:
-        seconds = int(float(reply.get("recording time") or 0))
-    except (TypeError, ValueError):
-        seconds = 0
-    return {
-        "id": slot_id,
-        "status": (reply.get("status") or "unknown").lower(),
-        "remaining_min": seconds // 60,
-        "volume": reply.get("volume name") or "",
-    }
+    return apply_slot(dict(reply.data, **{"slot id": str(slot_id)})) or {
+        "id": slot_id, "status": "empty", "remaining_min": 0, "volume": ""}
 
 
 def read_transport():
-    """Transportstatus lesen und sofort in den Zustand schreiben."""
+    """Transportstatus abfragen und in den Zustand schreiben."""
     transport = deck.command("transport info", timeout=8.0)
     if not transport.ok:
         log_throttled("transport", "Deck antwortet auf 'transport info' mit %s%s"
                       % (transport, transport.hint()), "err")
         return None
-
-    status = (transport.get("status") or "unbekannt").lower()
-    timecode = transport.get("timecode") or transport.get("display timecode") or "--:--:--:--"
-    raw_slot = (transport.get("slot id") or "").strip()
-    active = int(raw_slot) if raw_slot.isdigit() and raw_slot != "0" else None
-    set_state(status=status, timecode=timecode, active_slot=active)
-    return status, active
+    return apply_transport(transport.data)
 
 
 def poll_deck():
@@ -751,13 +875,22 @@ def poll_deck():
     now = time.monotonic()
     if now - _last_slot_poll[0] >= SLOT_POLL_MIN_S:
         _last_slot_poll[0] = now
-        slots = [read_slot(1), read_slot(2)]
-        set_state(slots=slots)
-    else:
-        with _state_lock:
-            slots = copy.deepcopy(STATE["slots"])
+        read_slot(1)
+        read_slot(2)
     set_state(last_poll=datetime.datetime.now().strftime("%H:%M:%S"))
 
+    with _state_lock:
+        slots = copy.deepcopy(STATE["slots"])
+    run_automation(status, active, slots)
+
+
+def automation_tick():
+    """Automatik mit dem aktuellen Zustand laufen lassen - nach einer Meldung
+    des Decks, ohne auf die naechste Abfrage zu warten."""
+    with _state_lock:
+        status = STATE["status"]
+        active = STATE["active_slot"]
+        slots = copy.deepcopy(STATE["slots"])
     run_automation(status, active, slots)
 
 
@@ -1010,15 +1143,17 @@ def worker_loop():
         if not deck.connected:
             set_state(busy="Verbinde", status="offline")
             try:
+                deck.on_async = handle_async
                 banner = deck.connect(cfg["deck_ip"], cfg["deck_port"])
                 model = (banner.get("model") if banner else None) or "HyperDeck"
                 set_state(connected=True, connection_error="", busy="", device=model)
                 log("Verbunden mit %s (%s:%d)." % (model, cfg["deck_ip"], cfg["deck_port"]), "ok")
+                enable_notifications()
                 last_poll = -1e9
                 backoff = 2.0
             except Exception as exc:
                 deck.close()
-                set_state(connected=False, busy="", status="offline",
+                set_state(connected=False, busy="", status="offline", notify=False,
                           connection_error=str(exc), seconds_until_check=0)
                 log_throttled("connect", "Keine Verbindung zu %s:%d - %s"
                               % (cfg["deck_ip"], cfg["deck_port"], exc), "err", period=30)
@@ -1051,23 +1186,39 @@ def worker_loop():
             remaining = interval - (time.monotonic() - last_poll)
             set_state(seconds_until_check=max(0, int(round(remaining))))
 
+            # Auf Meldungen des Decks warten statt bloss zu schlafen. Kommt
+            # eine, greift die Automatik sofort - nicht erst beim naechsten Poll.
+            if deck.connected:
+                deck.pump(0.25)
+                announced = _async_seen["transport"] or _async_seen["slot"]
+                now = time.monotonic()
+                # Zusaetzlich einmal pro Sekunde nachsehen: Wiederholsperren
+                # (Auto-Record, Timer) duerfen einen Ausloeser nicht verschlucken.
+                if announced or now - _last_automation[0] >= 1.0:
+                    _async_seen["transport"] = _async_seen["slot"] = False
+                    _last_automation[0] = now
+                    automation_tick()
+
         except DeckError as exc:
             log("Verbindung gestoert: %s - baue neu auf." % exc, "warn")
             deck.close()
-            set_state(connected=False, busy="", status="offline", connection_error=str(exc))
+            set_state(connected=False, busy="", status="offline", notify=False,
+                      connection_error=str(exc))
             shutdown.wait(1.0)
             continue
         except OSError as exc:
             log("Netzwerkfehler: %s - baue neu auf." % exc, "warn")
             deck.close()
-            set_state(connected=False, busy="", status="offline", connection_error=str(exc))
+            set_state(connected=False, busy="", status="offline", notify=False,
+                      connection_error=str(exc))
             shutdown.wait(1.0)
             continue
         except Exception as exc:  # darf den Thread niemals beenden
             log("Unerwarteter Fehler im Worker: %s" % exc, "err")
             shutdown.wait(1.0)
 
-        shutdown.wait(0.25)
+        if not deck.connected:
+            shutdown.wait(0.25)     # sonst hat pump() bereits gewartet
 
 
 # --------------------------------------------------------------------------

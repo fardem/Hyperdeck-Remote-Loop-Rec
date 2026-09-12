@@ -76,6 +76,16 @@ def list_tree(root):
 
 # ---------------------------------------------------------------- reine Logik
 
+def test_system_entries_are_skipped():
+    for name in ("System Volume Information", "$RECYCLE.BIN", ".Trashes",
+                 "Thumbs.db", "WPSettings.dat", "IndexerVolumeGuid", ".DS_Store",
+                 "halbe_datei.tmp", ".fseventsd"):
+        assert hb.is_system_entry(name), name
+    for name in ("HyperDeck_0001.mov", "Blackmagic HyperDeck Studio Mini_0002.mp4",
+                 "sd1", "2", "Aufnahme.braw"):
+        assert not hb.is_system_entry(name), name
+
+
 def test_names():
     info = hb.FileInfo("sd1/HyperDeck_0001.mov", 100, datetime.datetime(2026, 9, 12, 9, 0, 13))
     assert hb.target_name(info) == "2026-09-12_09-00-13_HyperDeck_0001.mov"
@@ -101,6 +111,9 @@ def run_server_tests():
     write_file(os.path.join(deck_dir, "sd1", "HyperDeck_0002.mov"), 1024 * 1024, age_s=0)   # waechst
     write_file(os.path.join(deck_dir, "sd2", "HyperDeck_0001.mov"), 2 * 1024 * 1024)
     write_file(os.path.join(deck_dir, "sd2", ".versteckt"), 10)
+    write_file(os.path.join(deck_dir, "System Volume Information", "WPSettings.dat"), 12)
+    write_file(os.path.join(deck_dir, "System Volume Information", "IndexerVolumeGuid"), 76)
+    write_file(os.path.join(deck_dir, "sd1", "Thumbs.db"), 4096)
     deck, deck_port = make_ftpd(deck_dir)
     nas, nas_port = make_ftpd(nas_dir, "nas", "geheim")
     serve_all(deck)                    # eine Schleife bedient beide Server
@@ -129,6 +142,8 @@ def run_server_tests():
     st = mirror.snapshot()
     got = list_tree(local_target)
     assert len(got) == 2, got
+    assert not any("WPSettings" in r or "Thumbs" in r or "System Volume" in r
+                   for r, _ in got), "Systemdateien duerfen nicht mitkommen"
     assert all(rel.split("/")[0] in ("sd1", "sd2") for rel, _ in got)
     assert all("_HyperDeck_0001.mov" in rel for rel, _ in got), got
     assert st["files_done"] == 2 and st["pending"] == 1 and st["error"] == "", st
@@ -187,10 +202,12 @@ def run_server_tests():
     mirror._run_pass(cfg, reason="Test")
     st = mirror.snapshot()
     nas_files = list_tree(nas_dir)
-    assert st["error"] == "" and st["files_done"] == 6, (st, nas_files)
+    sizes_deck = sorted(size for rel, size in list_tree(deck_dir)
+                        if size > 10 and not any(hb.is_system_entry(part)
+                                                 for part in rel.split("/")))
+    assert st["error"] == "" and st["files_done"] == len(sizes_deck), (st, nas_files)
     assert all(r.startswith("sicherung/deck1/sd") for r, _ in nas_files), nas_files
     assert not any(r.endswith(".part") for r, _ in nas_files)
-    sizes_deck = sorted(s for _, s in list_tree(deck_dir) if s > 10)
     assert sorted(s for _, s in nas_files) == sizes_deck, "FTP-Ziel muss bitgenau sein"
     mirror._run_pass(cfg, reason="Test")
     assert mirror.snapshot()["files_total"] == 0        # zweiter Lauf: alles da
@@ -384,6 +401,7 @@ def test_progress_text():
 if __name__ == "__main__":
     test_progress_text(); print("ok  Tacho-Texte")
     test_names();            print("ok  Namensbildung")
+    test_system_entries_are_skipped(); print("ok  Systemdateien ausgefiltert")
     if HAVE_FTPD:
         test_hyperdeck_quirks(); print("ok  HyperDeck-Eigenheiten")
         test_eta_in_log();       print("ok  Restzeit im Log")

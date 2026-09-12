@@ -31,18 +31,25 @@ def free_port():
 class Stack(object):
     """Startet Fake-Deck und Dienst, raeumt am Ende auf."""
 
+    def __init__(self, interval=5, stop_after=0.0):
+        self.interval = interval
+        self.stop_after = stop_after
+
     def __enter__(self):
         self.home = tempfile.mkdtemp(prefix="hdapi_")
         self.deck_port, self.web_port = free_port(), free_port()
         self.base = "http://127.0.0.1:%d" % self.web_port
         env = dict(os.environ, HYPERDECK_HOME=self.home, HYPERDECK_NO_PAUSE="1")
-        self.deck = subprocess.Popen([sys.executable, os.path.join(HERE, "fake_deck.py"),
-                                      str(self.deck_port)], stdout=subprocess.DEVNULL,
+        deck_args = [sys.executable, os.path.join(HERE, "fake_deck.py"), str(self.deck_port)]
+        if self.stop_after:
+            deck_args += ["--stop-after", str(self.stop_after)]
+        self.deck = subprocess.Popen(deck_args, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL)
         time.sleep(0.5)
         self.app = subprocess.Popen([sys.executable, os.path.join(ROOT, "hyperdeck_control.py"),
                                      "--ip", "127.0.0.1", "--port", str(self.deck_port),
-                                     "--web-port", str(self.web_port), "--interval", "5",
+                                     "--web-port", str(self.web_port),
+                                     "--interval", str(self.interval),
                                      "--no-browser"], env=env,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(60):
@@ -82,6 +89,23 @@ def wait_for(fn, timeout=12):
             return True
         time.sleep(0.25)
     return False
+
+
+def test_notifications_beat_polling():
+    """Das Deck meldet von selbst, wenn die Aufnahme endet - die Automatik muss
+    sofort reagieren und nicht erst bei der naechsten Abfrage."""
+    with Stack(interval=60, stop_after=2.0) as s:      # Abfrage erst in 60 s
+        assert wait_for(lambda: s.get("/api/status")["notify"] is True), "notify nicht aktiv"
+        assert wait_for(lambda: s.get("/api/status")["status"].startswith("record")), "Start"
+        # Das Deck beendet die Aufnahme nach 2 s von selbst.
+        assert wait_for(lambda: s.get("/api/status")["status"] == "stopped", 8), "Stopp gemeldet"
+        began = time.monotonic()
+        assert wait_for(lambda: s.get("/api/status")["status"].startswith("record"), 20), \
+            "Auto-Record haette sofort neu starten muessen"
+        took = time.monotonic() - began
+        assert took < 20, "Reaktion dauerte %.1f s - das war wohl die Abfrage" % took
+        log = s.text("/api/log.txt")
+        assert "meldet Aenderungen ab jetzt von selbst" in log, log[-400:]
 
 
 def test_end_to_end():
@@ -158,5 +182,6 @@ def test_end_to_end():
 
 
 if __name__ == "__main__":
-    test_end_to_end()
+    test_notifications_beat_polling(); print("ok  Meldungen statt Abfragen")
+    test_end_to_end();                 print("ok  Ende-zu-Ende")
     print("Alle API-Tests bestanden.")

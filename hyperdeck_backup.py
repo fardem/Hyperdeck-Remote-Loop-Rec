@@ -44,6 +44,21 @@ TRACE_MAX = 80              # so viele Zeilen FTP-Dialog werden mitgeschnitten
 LOG_PROGRESS_S = 30         # Abstand der Tacho-Zeilen im Log
 SPEED_SMOOTH = 0.25         # Glaettung der Geschwindigkeit (0 = traege, 1 = zappelig)
 PROBE_NAME = "_hyperdeck_schreibtest.tmp"
+
+# Verwaltungskram der Dateisysteme - gehoert nicht in die Sicherung.
+# Windows legt auf jeder Karte "System Volume Information" an, macOS ".Trashes".
+SKIP_FOLDERS = ("system volume information", "$recycle.bin", "recycler",
+                "lost+found", "found.000", ".trashes", ".spotlight-v100",
+                ".fseventsd", ".temporaryitems", ".documentrevisions-v100")
+SKIP_FILES = ("desktop.ini", "thumbs.db", "autorun.inf", ".ds_store",
+              "wpsettings.dat", "indexervolumeguid")
+
+
+def is_system_entry(name):
+    """True fuer Ordner und Dateien, die das Betriebssystem angelegt hat."""
+    plain = str(name).strip().lower()
+    return (plain.startswith(".") or plain in SKIP_FOLDERS or plain in SKIP_FILES
+            or plain.endswith(".tmp"))
 PART_SUFFIX = ".part"
 SLOT_FOLDER_RE = re.compile(r"(\d)$")
 
@@ -384,7 +399,7 @@ class FtpClient(object):
         names = self.list_names(abs_dir)
         folders = []
         for name in names:
-            if name.startswith("."):
+            if is_system_entry(name):
                 continue
             child = "%s/%s" % (rel, name) if rel else name
             size = self.size(name)

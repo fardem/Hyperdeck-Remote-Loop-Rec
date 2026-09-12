@@ -38,6 +38,7 @@ import argparse
 import copy
 import datetime
 import json
+import logging
 import os
 import queue
 import re
@@ -48,15 +49,28 @@ import time
 import traceback
 import webbrowser
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, send_from_directory
+from logging.handlers import RotatingFileHandler
+
+try:
+    import hyperdeck_backup
+except ImportError:
+    sys.exit("Die Datei hyperdeck_backup.py fehlt neben hyperdeck_control.py.\n"
+             "Bitte den kompletten Programmordner kopieren, nicht nur einzelne Dateien.")
 
 # --------------------------------------------------------------------------
 # Konfiguration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "3.0.0"       # wird in der Web-Oberflaeche und im Log angezeigt
+APP_VERSION = "3.1.0"       # wird in der Web-Oberflaeche und im Log angezeigt
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(APP_DIR, "hyperdeck_config.json")
+# Ablage fuer Konfiguration und Logdatei. Ueber die Umgebungsvariable
+# HYPERDECK_HOME laesst sich ein anderer Ordner waehlen - z. B. fuer eine
+# zweite Instanz mit einem zweiten Deck oder fuer Tests.
+DATA_DIR = os.environ.get("HYPERDECK_HOME") or APP_DIR
+CONFIG_PATH = os.path.join(DATA_DIR, "hyperdeck_config.json")
+LOG_PATH = os.path.join(DATA_DIR, "hyperdeck.log")
+STARTED_AT = time.time()
 
 TIMER_SLOTS = 3             # mehr als drei Zeitplaene sind nicht vorgesehen
 WEEKDAYS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]   # Index = date.weekday()
@@ -83,6 +97,27 @@ DEFAULT_SETTINGS = {
     "timer_enabled": False,         # Zeitgesteuerte Aufnahme (Timer-Recording)
     "timer_count": 1,               # sichtbare/aktive Zeitplaene: 1 bis 3
     "timers": copy.deepcopy(DEFAULT_TIMERS),
+    # Sicherung der Aufnahmen (FTP vom Deck -> Netzlaufwerk oder FTP-Server)
+    "deck_ftp_port": 21,
+    "deck_ftp_user": "",            # leer = anonym (Standard beim HyperDeck)
+    "deck_ftp_pass": "",
+    "backup_enabled": False,        # automatisch im Intervall spiegeln
+    "backup_interval": 15,          # Minuten
+    "backup_mode": "folder",        # "folder" (Ordner/Netzlaufwerk) oder "ftp"
+    "backup_folder": "",            # z. B. Z:\\HyperDeck oder \\\\NAS\\Aufnahmen
+    "backup_ftp_host": "",
+    "backup_ftp_port": 21,
+    "backup_ftp_user": "",
+    "backup_ftp_pass": "",
+    "backup_ftp_path": "/",
+    "backup_source_path": "/",      # Startordner am Deck (normalerweise die Wurzel)
+    "backup_block_format": True,    # Karte erst leeren, wenn ihre Clips gesichert sind
+}
+
+SECRET_KEYS = ("deck_ftp_pass", "backup_ftp_pass")
+SETTING_CHOICES = {
+    "format_filesystem": ("exFAT", "HFS+"),
+    "backup_mode": ("folder", "ftp"),
 }
 
 SETTING_TYPES = {
@@ -100,6 +135,20 @@ SETTING_TYPES = {
     "timer_enabled": bool,
     "timer_count": int,
     "timers": list,
+    "deck_ftp_port": int,
+    "deck_ftp_user": str,
+    "deck_ftp_pass": str,
+    "backup_enabled": bool,
+    "backup_interval": int,
+    "backup_mode": str,
+    "backup_folder": str,
+    "backup_ftp_host": str,
+    "backup_ftp_port": int,
+    "backup_ftp_user": str,
+    "backup_ftp_pass": str,
+    "backup_ftp_path": str,
+    "backup_source_path": str,
+    "backup_block_format": bool,
 }
 
 LIMITS = {
@@ -108,11 +157,15 @@ LIMITS = {
     "min_remaining_threshold": (1, 240),
     "inactive_min_free": (1, 2000),
     "timer_count": (1, TIMER_SLOTS),
+    "deck_ftp_port": (1, 65535),
+    "backup_interval": (1, 1440),
+    "backup_ftp_port": (1, 65535),
 }
 
 FORMAT_COOLDOWN_S = 180     # Sperre pro Slot nach einer Formatierung
 TIMER_RETRY_S = 10          # Wiederholabstand, wenn ein Timer-Befehl nicht griff
 TIMER_STOP_GRACE_S = 300    # so lange wird ein verpasster Timer-Stopp nachgeholt
+BACKUP_CLEAN_MAX_AGE_S = 900  # so alt darf die letzte saubere Sicherung vor dem Leeren sein
 LOG_MAX = 250
 
 # Fehlercodes des HyperDeck-Protokolls, die haeufig vorkommen
@@ -168,17 +221,37 @@ _logs = []
 _log_lock = threading.Lock()
 _log_seq = [0]
 _throttle = {}
+_file_log = logging.getLogger("hyperdeck")
+_file_log.propagate = False
+_LOG_LEVELS = {"err": logging.ERROR, "warn": logging.WARNING}
+
+
+def setup_file_log():
+    """Rotierende Logdatei neben dem Skript (1 MB, drei Generationen), damit
+    sich auch nach Tagen noch nachvollziehen laesst, was passiert ist."""
+    try:
+        handler = RotatingFileHandler(LOG_PATH, maxBytes=1000000, backupCount=3,
+                                      encoding="utf-8")
+    except OSError as exc:
+        log("Logdatei %s nicht schreibbar: %s" % (LOG_PATH, exc), "warn")
+        return
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s",
+                                           "%Y-%m-%d %H:%M:%S"))
+    _file_log.addHandler(handler)
+    _file_log.setLevel(logging.INFO)
 
 
 def log(msg, level="info"):
-    """Schreibt eine Zeile in Konsole und Web-Log. Jede Zeile hat eine ID,
-    damit der Browser nur die neuen Zeilen nachladen muss."""
+    """Schreibt eine Zeile in Konsole, Web-Log und Logdatei. Jede Zeile hat
+    eine ID, damit der Browser nur die neuen Zeilen nachladen muss."""
     stamp = datetime.datetime.now().strftime("%H:%M:%S")
     text = str(msg)
     with _log_lock:
         _log_seq[0] += 1
         _logs.append({"id": _log_seq[0], "time": stamp, "msg": text, "level": level})
         del _logs[:-LOG_MAX]
+    if _file_log.handlers:
+        _file_log.log(_LOG_LEVELS.get(level, logging.INFO), text)
     try:
         print("[%s] %s" % (stamp, text), flush=True)
     except UnicodeEncodeError:      # exotische Konsolen-Codepage
@@ -293,7 +366,11 @@ def _coerce(key, value):
         if lo is not None:
             value = max(lo, min(hi, value))
         return value
-    return str(value).strip()
+    value = str(value).strip()
+    choices = SETTING_CHOICES.get(key)
+    if choices and value not in choices:
+        raise ValueError("%s: %r nicht erlaubt" % (key, value))
+    return value
 
 
 def update_settings(new_values, persist=True):
@@ -328,9 +405,15 @@ def load_config():
 
 
 def save_config(snapshot):
+    """Erst in eine Temporaerdatei, dann umbenennen: ein Absturz oder
+    Stromausfall mitten im Schreiben hinterlaesst keine kaputte Konfiguration."""
+    tmp = CONFIG_PATH + ".tmp"
     try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
+        with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(snapshot, fh, indent=2, ensure_ascii=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, CONFIG_PATH)
     except Exception as exc:
         log("Einstellungen konnten nicht gespeichert werden: %s" % exc, "warn")
 
@@ -475,6 +558,25 @@ _format_name_supported = {"value": True}
 
 def is_recording(status):
     return str(status).lower().startswith("record")
+
+
+def get_recording_state():
+    with _state_lock:
+        return is_recording(STATE["status"]), STATE["active_slot"]
+
+
+# Die Sicherung laeuft in einem eigenen Thread ueber FTP (Port 21) und hat mit
+# der Steuerverbindung (9993) nichts zu tun.
+backup = hyperdeck_backup.Mirror(get_settings, log, get_recording_state)
+
+_poll_pending = threading.Event()
+
+
+def request_poll():
+    """Loest eine sofortige Abfrage aus - aber nur eine, egal wie oft gedrueckt wird."""
+    if not _poll_pending.is_set():
+        _poll_pending.set()
+        jobs.put({"action": "poll"})
 
 
 def do_record(manual=False):
@@ -669,6 +771,15 @@ def run_automation(status, active, slots):
     if time.monotonic() - _format_cooldown[other] < FORMAT_COOLDOWN_S:
         return
 
+    if cfg["backup_enabled"] and cfg["backup_block_format"]:
+        if not backup.is_clean(BACKUP_CLEAN_MAX_AGE_S, slot_id=other):
+            backup.request_run(scope=backup.slot_folder(other),
+                               reason="vor dem Leeren von Slot %d" % other)
+            log_throttled("backup-wait-%d" % other,
+                          "Slot %d wird erst geleert, wenn seine Aufnahmen gesichert sind - "
+                          "Sicherung wird angestossen." % other, "warn", period=60)
+            return
+
     log("Restzeit Slot %d: %d min - bereite Slot %d vor." % (active, remaining_active, other),
         "warn")
     do_format(other)
@@ -847,7 +958,8 @@ def handle_job(job):
         log("Verbindung wird auf Wunsch neu aufgebaut.")
         deck.close()
         set_state(connected=False, status="offline")
-    # "poll" braucht nichts zu tun, es loest nur eine sofortige Abfrage aus
+    elif action == "poll":
+        _poll_pending.clear()   # loest nur die sofortige Abfrage aus
 
 
 def worker_loop():
@@ -925,674 +1037,6 @@ def worker_loop():
 # Weboberflaeche
 # --------------------------------------------------------------------------
 
-HTML_PAGE = r"""<!doctype html>
-<html lang="de">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>HyperDeck Control</title>
-<style>
-:root{
-  --bg:#08090c;
-  --panel:#111319;
-  --panel-hi:#161922;
-  --line:#22262f;
-  --line-soft:#1a1d25;
-  --txt:#e7eaf0;
-  --dim:#8a92a2;
-  --dim2:#5c6472;
-  --rec:#ff3b30;
-  --ok:#35d07f;
-  --warn:#ffb020;
-  --acc:#5b8cff;
-  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Roboto Mono",monospace;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-/* Ohne !important gewinnt eine eigene display-Regel gegen das hidden-Attribut -
-   dann blieben ausgeblendete Hinweisleisten als leere Balken stehen. */
-[hidden]{display:none!important}
-html{-webkit-text-size-adjust:100%}
-body{
-  background:var(--bg);
-  color:var(--txt);
-  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,sans-serif;
-  font-size:15px;line-height:1.45;
-  padding:16px;display:flex;justify-content:center;
-}
-.wrap{width:100%;max-width:920px;display:flex;flex-direction:column;gap:12px}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
-.eyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim2);
-  font-weight:600;margin-bottom:10px}
-
-/* Kopfzeile */
-.top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
-.top h1{font-size:16px;font-weight:650;letter-spacing:-.01em}
-.host{font-family:var(--mono);font-size:12px;color:var(--dim2)}
-.badge{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:600;
-  color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:2px 9px;
-  margin-left:9px;vertical-align:middle;letter-spacing:.02em}
-.link{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim)}
-.dot{width:8px;height:8px;border-radius:50%;background:var(--dim2);flex:none}
-.dot.on{background:var(--ok);box-shadow:0 0 0 3px rgba(53,208,127,.15)}
-.dot.off{background:var(--rec);box-shadow:0 0 0 3px rgba(255,59,48,.15)}
-
-/* Tally + Timecode */
-.stage{display:grid;grid-template-columns:auto 1fr;gap:18px;align-items:center}
-@media(max-width:560px){.stage{grid-template-columns:1fr;gap:12px}}
-.tally{
-  border:1px solid var(--line);border-radius:12px;padding:14px 16px;min-width:132px;
-  background:var(--panel-hi);text-align:center
-}
-.tally.live{border-color:rgba(255,59,48,.55);background:rgba(255,59,48,.10)}
-.tally .word{font-size:19px;font-weight:700;letter-spacing:.12em}
-.tally.live .word{color:var(--rec)}
-.tally .sub{font-size:11px;color:var(--dim2);letter-spacing:.08em;text-transform:uppercase;margin-top:2px}
-.tally.live .word::before{content:"";display:inline-block;width:9px;height:9px;border-radius:50%;
-  background:var(--rec);margin-right:9px;vertical-align:middle;animation:blink 1.4s infinite}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
-.tc{font-family:var(--mono);font-size:clamp(34px,9vw,54px);font-weight:600;letter-spacing:.02em;
-  font-variant-numeric:tabular-nums;line-height:1}
-.tc-label{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim2);margin-top:6px}
-
-/* Hinweisleisten */
-.notice{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
-  border-radius:12px;padding:12px 16px;font-size:14px}
-.notice.lock{background:rgba(255,176,32,.10);border:1px solid rgba(255,176,32,.4);color:#ffd98a}
-.notice.busy{background:rgba(91,140,255,.10);border:1px solid rgba(91,140,255,.4);color:#bcd0ff}
-.notice.err{background:rgba(255,59,48,.10);border:1px solid rgba(255,59,48,.4);color:#ffb3ae}
-.notice.timer{background:rgba(53,208,127,.10);border:1px solid rgba(53,208,127,.4);color:#a6e9c6}
-
-/* Karten-Slots */
-.slots{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-@media(max-width:560px){.slots{grid-template-columns:1fr}}
-.slot{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
-.slot.active{border-color:rgba(53,208,127,.5)}
-.slot.low{border-color:rgba(255,176,32,.55)}
-.slot-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
-.slot-name{font-size:14px;font-weight:650}
-.tag{font-size:10px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;
-  padding:3px 8px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
-.tag.rec{color:var(--ok);border-color:rgba(53,208,127,.5)}
-.mins{font-family:var(--mono);font-size:32px;font-weight:600;font-variant-numeric:tabular-nums;
-  margin:10px 0 2px}
-.mins small{font-family:inherit;font-size:12px;font-weight:400;color:var(--dim2);margin-left:6px;
-  letter-spacing:.06em}
-.bar{height:5px;border-radius:3px;background:var(--line-soft);overflow:hidden;margin:10px 0 10px}
-.bar span{display:block;height:100%;background:var(--acc);transition:width .4s ease}
-.bar span.low{background:var(--warn)}
-.meta{font-size:12px;color:var(--dim2);display:flex;justify-content:space-between;gap:8px}
-
-/* Bedienung */
-.buttons{display:flex;gap:10px;flex-wrap:wrap}
-button{font:inherit;font-weight:650;color:var(--txt);background:var(--panel-hi);
-  border:1px solid var(--line);border-radius:10px;padding:11px 18px;cursor:pointer;
-  transition:filter .15s,transform .06s}
-button:hover{filter:brightness(1.25)}
-button:active{transform:translateY(1px)}
-button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
-button:disabled{opacity:.45;cursor:not-allowed}
-.b-rec{background:var(--rec);border-color:var(--rec);color:#fff}
-.b-warn{background:rgba(255,176,32,.14);border-color:rgba(255,176,32,.45);color:#ffd98a}
-.b-ghost{background:transparent}
-.b-sm{padding:7px 12px;font-size:13px;font-weight:600}
-
-/* Schalter */
-.switches{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin-top:14px}
-.sw{display:flex;align-items:center;justify-content:space-between;gap:12px;
-  background:var(--panel-hi);border:1px solid var(--line);border-radius:10px;padding:11px 14px}
-.sw .t{font-size:13.5px;font-weight:600}
-.sw .d{font-size:11.5px;color:var(--dim2);margin-top:1px}
-.track{position:relative;width:42px;height:24px;border-radius:999px;background:#2a2f3a;flex:none;
-  cursor:pointer;transition:background .18s}
-.track::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;
-  background:#fff;transition:transform .18s}
-.track.on{background:var(--ok)}
-.track.on::after{transform:translateX(18px)}
-input[type=checkbox]{position:absolute;opacity:0;width:0;height:0}
-input[type=checkbox]:focus-visible + .track{outline:2px solid var(--acc);outline-offset:2px}
-
-/* Zeitplaene */
-.trow{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-top:10px;
-  background:var(--panel-hi)}
-.trow.off{opacity:.5}
-.trow-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
-.trow-name{font-size:13.5px;font-weight:650}
-.trow-sum{font-size:11.5px;color:var(--dim2);margin-top:1px}
-.toggle-mini{display:flex;align-items:center;gap:9px;cursor:pointer;font-size:12px;color:var(--dim)}
-.days{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0}
-.day{font:inherit;font-size:12px;font-weight:600;min-width:44px;padding:7px 0;text-align:center;
-  border-radius:9px;border:1px solid var(--line);background:transparent;color:var(--dim2);cursor:pointer}
-.day.on{background:rgba(91,140,255,.16);border-color:rgba(91,140,255,.55);color:#cfdcff}
-.times{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
-
-/* Einstellungen */
-.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
-.field{display:flex;flex-direction:column;gap:6px}
-.field label{font-size:12px;color:var(--dim)}
-.field input,.field select{background:#0c0e13;border:1px solid var(--line);color:var(--txt);
-  border-radius:9px;padding:10px 12px;font:inherit;font-family:var(--mono);font-size:14px}
-.field input:focus,.field select:focus{outline:none;border-color:var(--acc)}
-.hint{font-size:12px;color:var(--dim2);margin-top:12px}
-.row{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap}
-
-/* Countdown */
-.poll{display:flex;align-items:center;gap:12px;margin-top:14px;font-size:12.5px;color:var(--dim)}
-.poll .track2{flex:1;height:4px;border-radius:2px;background:var(--line-soft);overflow:hidden;min-width:80px}
-.poll .track2 span{display:block;height:100%;background:var(--dim2);transition:width .9s linear}
-
-/* Log */
-.log{background:#0a0c10;border:1px solid var(--line-soft);border-radius:10px;padding:10px 12px;
-  height:190px;overflow-y:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6}
-.log div{white-space:pre-wrap;word-break:break-word}
-.log .t{color:var(--dim2)}
-.log .info{color:#c3cad6}
-.log .ok{color:var(--ok)}
-.log .warn{color:var(--warn)}
-.log .err{color:#ff7b73}
-@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
-</style>
-</head>
-<body>
-<div class="wrap">
-
-  <div class="panel">
-    <div class="top">
-      <div>
-        <h1><span id="device">HyperDeck Control</span><span class="badge" id="ver">v{{APP_VERSION}}</span></h1>
-        <div class="host" id="host">--</div>
-      </div>
-      <div class="link"><span class="dot" id="dot"></span><span id="linkTxt">Verbinde …</span></div>
-    </div>
-
-    <div class="stage" style="margin-top:18px">
-      <div class="tally" id="tally">
-        <div class="word" id="tallyWord">--</div>
-        <div class="sub" id="tallySub">Status</div>
-      </div>
-      <div>
-        <div class="tc" id="tc">--:--:--:--</div>
-        <div class="tc-label" id="tcLabel">Timecode</div>
-      </div>
-    </div>
-
-    <div class="poll">
-      <span>Nächste Abfrage in <b id="cd" style="color:var(--txt);font-family:var(--mono)">--</b> s</span>
-      <div class="track2"><span id="cdBar" style="width:100%"></span></div>
-      <span id="lastPoll"></span>
-    </div>
-  </div>
-
-  <div id="noticeTimer" class="notice timer" hidden><span id="timerTxt"></span></div>
-  <div id="noticeLock" class="notice lock" hidden>
-    <span>Manuell gestoppt. Auto-Record bleibt aus, bis du ihn freigibst.</span>
-    <button class="b-warn b-sm" onclick="send('resume_auto')">Auto-Record freigeben</button>
-  </div>
-  <div id="noticeBusy" class="notice busy" hidden><span id="busyTxt"></span></div>
-  <div id="noticeErr" class="notice err" hidden><span id="errTxt"></span></div>
-
-  <div class="slots" id="slots"></div>
-
-  <div class="panel">
-    <div class="eyebrow">Bedienung</div>
-    <div class="buttons">
-      <button class="b-rec" onclick="send('record')">Aufnahme starten</button>
-      <button onclick="send('stop')">Aufnahme stoppen</button>
-      <button class="b-ghost" onclick="send('poll')">Jetzt abfragen</button>
-      <button class="b-ghost" onclick="send('reconnect')">Neu verbinden</button>
-    </div>
-
-    <div class="switches">
-      <label class="sw">
-        <div><div class="t">Loop-Record</div><div class="d">Hauptschalter: aus = keinerlei Automatik</div></div>
-        <input type="checkbox" id="sw_loop_record" onchange="setFlag('loop_record',this.checked)">
-        <span class="track" id="tr_loop_record"></span>
-      </label>
-      <label class="sw">
-        <div><div class="t">Auto-Record</div><div class="d">Startet die Aufnahme neu, wenn das Deck steht</div></div>
-        <input type="checkbox" id="sw_auto_record" onchange="setFlag('auto_record',this.checked)">
-        <span class="track" id="tr_auto_record"></span>
-      </label>
-      <label class="sw">
-        <div><div class="t">Auto-Loop</div><div class="d">Formatiert die inaktive Karte rechtzeitig</div></div>
-        <input type="checkbox" id="sw_auto_loop" onchange="setFlag('auto_loop',this.checked)">
-        <span class="track" id="tr_auto_loop"></span>
-      </label>
-      <label class="sw">
-        <div><div class="t">Timecode auf Uhrzeit</div><div class="d">Setzt den Startzeitcode auf die Systemzeit</div></div>
-        <input type="checkbox" id="sw_sync_timecode" onchange="setFlag('sync_timecode',this.checked)">
-        <span class="track" id="tr_sync_timecode"></span>
-      </label>
-    </div>
-  </div>
-
-  <div class="panel">
-    <div class="eyebrow">Timer-Aufnahme</div>
-    <div class="switches" style="margin-top:0">
-      <label class="sw">
-        <div><div class="t">Timer aktiv</div><div class="d">Startet und stoppt zur eingestellten Uhrzeit</div></div>
-        <input type="checkbox" id="sw_timer_enabled" onchange="setFlag('timer_enabled',this.checked)">
-        <span class="track" id="tr_timer_enabled"></span>
-      </label>
-      <div class="sw">
-        <div><div class="t">Anzahl Zeitpläne</div><div class="d">1 bis 3 Einträge</div></div>
-        <select id="timerCount" onchange="setCount(this.value)"
-                style="background:#0c0e13;border:1px solid var(--line);color:var(--txt);
-                       border-radius:9px;padding:8px 10px;font:inherit;font-family:var(--mono)">
-          <option value="1">1</option><option value="2">2</option><option value="3">3</option>
-        </select>
-      </div>
-    </div>
-
-    <div class="hint" id="timerState" style="margin-top:14px">Timer aus</div>
-    <div id="timerRows"></div>
-
-    <div class="row">
-      <button onclick="saveTimers()">Zeitpläne speichern</button>
-      <button class="b-ghost b-sm" onclick="discardTimers()">Verwerfen</button>
-      <span class="hint" id="timerHint">Uhrzeiten wirken sofort nach dem Speichern.</span>
-    </div>
-  </div>
-
-  <div class="panel">
-    <div class="eyebrow">Einstellungen</div>
-    <div class="fields">
-      <div class="field">
-        <label for="f_deck_ip">Deck-IP</label>
-        <input id="f_deck_ip" data-key="deck_ip" type="text" inputmode="decimal">
-      </div>
-      <div class="field">
-        <label for="f_deck_port">Deck-Port</label>
-        <input id="f_deck_port" data-key="deck_port" type="number" min="1" max="65535">
-      </div>
-      <div class="field">
-        <label for="f_check_interval">Abfrage alle … Sekunden</label>
-        <input id="f_check_interval" data-key="check_interval" type="number" min="5" max="3600">
-      </div>
-      <div class="field">
-        <label for="f_min_remaining_threshold">Vorbereiten ab … Minuten Rest</label>
-        <input id="f_min_remaining_threshold" data-key="min_remaining_threshold" type="number" min="1" max="240">
-      </div>
-      <div class="field">
-        <label for="f_inactive_min_free">Karte leeren unter … Minuten frei</label>
-        <input id="f_inactive_min_free" data-key="inactive_min_free" type="number" min="1" max="2000">
-      </div>
-      <div class="field">
-        <label for="f_format_filesystem">Dateisystem</label>
-        <select id="f_format_filesystem" data-key="format_filesystem">
-          <option value="exFAT">exFAT</option>
-          <option value="HFS+">HFS+</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="f_format_name">Datenträgername</label>
-        <input id="f_format_name" data-key="format_name" type="text">
-      </div>
-    </div>
-    <div class="row">
-      <button onclick="saveSettings()">Einstellungen speichern</button>
-      <span class="hint" id="saveHint">Werden in hyperdeck_config.json gesichert.</span>
-    </div>
-  </div>
-
-  <div class="panel">
-    <div class="eyebrow">Ereignisse</div>
-    <div class="log" id="log"></div>
-    <div class="hint" id="foot">HyperDeck Web Control v{{APP_VERSION}}</div>
-  </div>
-
-</div>
-
-<script>
-var $ = function(id){ return document.getElementById(id); };
-var dirty = {};          // vom Benutzer angefasste Felder nicht ueberschreiben
-var timerDirty = false;  // ungespeicherte Aenderung an den Zeitplaenen
-var logSeq = 0;          // zuletzt empfangene Log-Zeile
-var lastInterval = 60;
-var DAYS = ['Mo','Di','Mi','Do','Fr','Sa','So'];
-
-// Countdown laeuft lokal weiter, damit er auch zwischen zwei Serverantworten tickt
-var cdValue = null;
-var cdStamp = 0;
-var busyNow = '';
-
-function num(v){
-  var n = Number(v);
-  return (v === null || v === '' || typeof v === 'undefined' || !isFinite(n)) ? null : n;
-}
-
-function esc(s){
-  return String(s).replace(/[&<>"]/g, function(c){
-    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
-  });
-}
-
-async function api(path, body){
-  var opt = {};
-  if (body){
-    opt = { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) };
-  }
-  var res = await fetch(path, opt);
-  return res.json();
-}
-
-async function send(action, extra){
-  var payload = { action: action };
-  if (extra){ for (var k in extra){ payload[k] = extra[k]; } }
-  await api('/api/command', payload);
-  refresh();
-}
-
-async function setFlag(key, value){
-  var body = {};
-  body[key] = value;
-  await api('/api/settings', body);
-  refresh();
-}
-
-async function formatSlot(id){
-  if (!confirm('Slot ' + id + ' wirklich formatieren? Alle Aufnahmen auf dieser Karte gehen verloren.')) return;
-  await send('format', { slot_id: id });
-}
-
-/* ---------- Zeitplaene ------------------------------------------------ */
-
-function buildTimerRows(){
-  var html = '';
-  for (var i = 0; i < 3; i++){
-    var d = '';
-    for (var k = 0; k < 7; k++){
-      d += '<button type="button" class="day" id="t' + i + '_d' + k +
-           '" onclick="toggleDay(' + i + ',' + k + ')">' + DAYS[k] + '</button>';
-    }
-    html +=
-      '<div class="trow" id="trow' + i + '" hidden>' +
-        '<div class="trow-head">' +
-          '<div><div class="trow-name">Autorecord ' + (i + 1) + '</div>' +
-          '<div class="trow-sum" id="t' + i + '_sum"></div></div>' +
-          '<label class="toggle-mini">aktiv' +
-            '<input type="checkbox" id="t' + i + '_on" onchange="timerTouched()">' +
-            '<span class="track" id="t' + i + '_tr"></span>' +
-          '</label>' +
-        '</div>' +
-        '<div class="days">' + d + '</div>' +
-        '<div class="times">' +
-          '<div class="field"><label for="t' + i + '_start">Start</label>' +
-            '<input type="time" id="t' + i + '_start" onchange="timerTouched()"></div>' +
-          '<div class="field"><label for="t' + i + '_end">Ende</label>' +
-            '<input type="time" id="t' + i + '_end" onchange="timerTouched()"></div>' +
-        '</div>' +
-      '</div>';
-  }
-  $('timerRows').innerHTML = html;
-}
-
-function toggleDay(i, k){
-  var el = $('t' + i + '_d' + k);
-  el.className = (el.className.indexOf('on') >= 0) ? 'day' : 'day on';
-  timerTouched();
-}
-
-function timerTouched(){
-  timerDirty = true;
-  $('timerHint').textContent = 'Nicht gespeichert - auf "Zeitpläne speichern" klicken.';
-  for (var i = 0; i < 3; i++){ paintRow(i); }
-}
-
-function paintRow(i){
-  var on = $('t' + i + '_on').checked;
-  $('t' + i + '_tr').className = on ? 'track on' : 'track';
-  $('trow' + i).className = on ? 'trow' : 'trow off';
-  var days = [];
-  for (var k = 0; k < 7; k++){
-    if ($('t' + i + '_d' + k).className.indexOf('on') >= 0) days.push(DAYS[k]);
-  }
-  var s = $('t' + i + '_start').value, e = $('t' + i + '_end').value;
-  var over = (s && e && e <= s) ? ' (über Mitternacht)' : '';
-  $('t' + i + '_sum').textContent = !on ? 'ausgeschaltet'
-    : (!days.length ? 'kein Wochentag gewählt'
-    : days.join(' ') + ' · ' + s + '–' + e + ' Uhr' + over);
-}
-
-function fillTimers(d){
-  var count = num(d.timer_count) || 1;
-  for (var i = 0; i < 3; i++){ $('trow' + i).hidden = (i >= count); }
-  if (document.activeElement !== $('timerCount')) $('timerCount').value = count;
-  if (timerDirty) return;                       // Eingaben nicht ueberschreiben
-  var list = d.timers || [];
-  for (var j = 0; j < 3; j++){
-    var t = list[j] || {};
-    $('t' + j + '_on').checked = !!t.enabled;
-    if (document.activeElement !== $('t' + j + '_start')) $('t' + j + '_start').value = t.start || '';
-    if (document.activeElement !== $('t' + j + '_end')) $('t' + j + '_end').value = t.end || '';
-    var days = t.days || [];
-    for (var k = 0; k < 7; k++){
-      $('t' + j + '_d' + k).className = (days.indexOf(k) >= 0) ? 'day on' : 'day';
-    }
-    paintRow(j);
-  }
-}
-
-async function setCount(value){
-  await api('/api/settings', { timer_count: value });
-  refresh();
-}
-
-async function saveTimers(){
-  var list = [];
-  for (var i = 0; i < 3; i++){
-    var days = [];
-    for (var k = 0; k < 7; k++){
-      if ($('t' + i + '_d' + k).className.indexOf('on') >= 0) days.push(k);
-    }
-    list.push({
-      enabled: $('t' + i + '_on').checked,
-      days: days,
-      start: $('t' + i + '_start').value || '00:00',
-      end: $('t' + i + '_end').value || '00:00'
-    });
-  }
-  await api('/api/settings', { timers: list, timer_count: $('timerCount').value });
-  timerDirty = false;
-  $('timerHint').textContent = 'Gespeichert.';
-  setTimeout(function(){ $('timerHint').textContent = 'Uhrzeiten wirken sofort nach dem Speichern.'; }, 4000);
-  refresh();
-}
-
-function discardTimers(){
-  timerDirty = false;
-  $('timerHint').textContent = 'Änderungen verworfen.';
-  refresh();
-}
-
-async function saveSettings(){
-  var body = {};
-  var nodes = document.querySelectorAll('[data-key]');
-  for (var i = 0; i < nodes.length; i++){
-    var el = nodes[i];
-    body[el.dataset.key] = el.value;
-  }
-  var res = await api('/api/settings', body);
-  dirty = {};
-  var n = Object.keys(res.changed || {}).length;
-  $('saveHint').textContent = n ? ('Gespeichert: ' + Object.keys(res.changed).join(', ')) : 'Keine Änderung.';
-  setTimeout(function(){ $('saveHint').textContent = 'Werden in hyperdeck_config.json gesichert.'; }, 4000);
-  refresh();
-}
-
-document.addEventListener('input', function(e){
-  if (e.target && e.target.dataset && e.target.dataset.key){ dirty[e.target.dataset.key] = true; }
-});
-document.addEventListener('change', function(e){
-  if (e.target && e.target.dataset && e.target.dataset.key){ dirty[e.target.dataset.key] = true; }
-});
-
-function fillField(id, key, value){
-  var el = $(id);
-  if (!el || dirty[key] || document.activeElement === el) return;
-  if (el.value !== String(value)) el.value = value;
-}
-
-function setSwitch(key, on){
-  var box = $('sw_' + key), track = $('tr_' + key);
-  if (!box) return;
-  box.checked = !!on;
-  track.className = on ? 'track on' : 'track';
-}
-
-function renderSlots(d){
-  if (!d.slots || !d.slots.length){
-    $('slots').innerHTML = '<div class="panel">Keine Slot-Daten vom Deck.</div>';
-    return;
-  }
-  var scale = 60;
-  for (var i = 0; i < d.slots.length; i++){ scale = Math.max(scale, num(d.slots[i].remaining_min) || 0); }
-  var threshold = num(d.min_remaining_threshold) || 0;
-  var html = '';
-  for (var j = 0; j < d.slots.length; j++){
-    var s = d.slots[j];
-    var mins = num(s.remaining_min);
-    var isActive = d.active_slot === s.id;
-    var rec = isActive && String(d.status).indexOf('record') === 0;
-    var low = rec && mins !== null && mins <= threshold;
-    var pct = Math.max(2, Math.min(100, Math.round((mins || 0) / scale * 100)));
-    var mounted = s.status === 'mounted' && mins !== null;
-    var lf = (d.last_format || {})[String(s.id)];
-    var stamp = lf ? 'zuletzt geleert ' + esc(lf) : '';
-    html += '<div class="slot' + (isActive ? ' active' : '') + (low ? ' low' : '') + '">' +
-      '<div class="slot-head"><div class="slot-name">Slot ' + s.id +
-        (s.volume ? ' · <span style="color:var(--dim2);font-weight:400">' + esc(s.volume) + '</span>' : '') +
-      '</div>' +
-      (isActive ? '<span class="tag' + (rec ? ' rec' : '') + '">' + (rec ? 'nimmt auf' : 'aktiv') + '</span>' : '') +
-      '</div>' +
-      '<div class="mins">' + (mounted ? mins : '—') + '<small>Minuten frei</small></div>' +
-      '<div class="bar"><span class="' + (low ? 'low' : '') + '" style="width:' + (mounted ? pct : 0) + '%"></span></div>' +
-      '<div class="meta"><span>' + esc(s.status || 'unbekannt') + '</span><span>' + stamp + '</span></div>' +
-      '<div style="margin-top:12px"><button class="b-sm b-ghost" ' + (mounted ? '' : 'disabled ') +
-        'onclick="formatSlot(' + s.id + ')">Karte leeren</button></div>' +
-      '</div>';
-  }
-  $('slots').innerHTML = html;
-}
-
-function renderLog(d){
-  var logs = d.logs || [];
-  var box = $('log');
-  if (d.log_reset) box.innerHTML = '';
-  if (typeof d.log_seq === 'number') logSeq = d.log_seq;
-  if (!logs.length) return;
-  var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-  var html = '';
-  for (var i = 0; i < logs.length; i++){
-    html += '<div><span class="t">' + esc(logs[i].time) + '</span> <span class="' +
-      esc(logs[i].level) + '">' + esc(logs[i].msg) + '</span></div>';
-  }
-  box.insertAdjacentHTML('beforeend', html);   // nur die neuen Zeilen anhaengen
-  while (box.childElementCount > 250) box.removeChild(box.firstElementChild);
-  if (atBottom) box.scrollTop = box.scrollHeight;
-}
-
-function localCountdown(){
-  if (cdValue === null) return null;
-  return Math.max(0, cdValue - (Date.now() - cdStamp) / 1000);
-}
-
-function paintCountdown(){
-  var v = localCountdown();
-  if (busyNow){
-    $('cd').textContent = '…';
-    $('cdBar').style.width = '100%';
-    return;
-  }
-  $('cd').textContent = (v === null) ? '--' : Math.ceil(v);
-  $('cdBar').style.width = (v === null ? 0 : Math.max(0, Math.min(100, v / lastInterval * 100))) + '%';
-}
-
-async function refresh(){
-  var d;
-  try {
-    d = await api('/api/status?since=' + logSeq);
-  } catch (e){
-    $('dot').className = 'dot off';
-    $('linkTxt').textContent = 'Webserver nicht erreichbar';
-    return;
-  }
-
-  $('device').textContent = d.device || 'HyperDeck Control';
-  if (d.app_version) $('ver').textContent = 'v' + d.app_version;
-  $('host').textContent = d.deck_ip + ':' + d.deck_port;
-  $('dot').className = 'dot ' + (d.connected ? 'on' : 'off');
-  $('linkTxt').textContent = d.connected ? 'verbunden' : 'keine Verbindung';
-
-  var recording = String(d.status).indexOf('record') === 0;
-  $('tally').className = recording ? 'tally live' : 'tally';
-  $('tallyWord').textContent = recording ? 'REC' : String(d.status || '--').toUpperCase();
-  $('tallySub').textContent = recording ? 'Aufnahme läuft' : 'Transportstatus';
-  $('tc').textContent = d.timecode;
-  $('tcLabel').textContent = d.active_slot ? ('Timecode · Slot ' + d.active_slot) : 'Timecode';
-
-  lastInterval = num(d.check_interval) || 60;
-  var server = num(d.seconds_until_check);
-  if (!d.connected || server === null){
-    cdValue = null;
-  } else if (cdValue === null || Math.abs(server - localCountdown()) > 1.5){
-    cdValue = server; cdStamp = Date.now();     // neu synchronisieren
-  }
-  busyNow = d.busy || '';
-  paintCountdown();
-  $('lastPoll').textContent = d.last_poll ? ('zuletzt ' + d.last_poll) : '';
-
-  $('foot').textContent = 'HyperDeck Web Control v' + (d.app_version || '?') +
-    ' · Deck ' + d.deck_ip + ':' + d.deck_port;
-
-  $('timerState').textContent = d.timer_info || 'Timer aus';
-  $('noticeTimer').hidden = !d.timer_active;
-  $('timerTxt').textContent = d.timer_info || '';
-
-  $('noticeLock').hidden = !d.manual_stop;
-  $('noticeBusy').hidden = !d.busy;
-  $('busyTxt').textContent = d.busy ? (d.busy + ' … das kann eine Weile dauern.') : '';
-  var showErr = !d.connected && d.connection_error;
-  $('noticeErr').hidden = !showErr;
-  if (showErr) $('errTxt').textContent = 'Deck nicht erreichbar: ' + d.connection_error;
-
-  renderSlots(d);
-
-  setSwitch('loop_record', d.loop_record);
-  setSwitch('auto_record', d.auto_record);
-  setSwitch('auto_loop', d.auto_loop);
-  setSwitch('sync_timecode', d.sync_timecode);
-  setSwitch('timer_enabled', d.timer_enabled);
-
-  // Die Unterschalter haengen am Hauptschalter Loop-Record
-  var lr = !!d.loop_record;
-  ['auto_record','auto_loop'].forEach(function(key){
-    var box = $('sw_' + key);
-    box.disabled = !lr;
-    var row = box.parentNode;
-    if (row && row.style) row.style.opacity = lr ? '' : '.45';
-  });
-
-  fillTimers(d);
-
-  fillField('f_deck_ip', 'deck_ip', d.deck_ip);
-  fillField('f_deck_port', 'deck_port', d.deck_port);
-  fillField('f_check_interval', 'check_interval', d.check_interval);
-  fillField('f_min_remaining_threshold', 'min_remaining_threshold', d.min_remaining_threshold);
-  fillField('f_inactive_min_free', 'inactive_min_free', d.inactive_min_free);
-  fillField('f_format_filesystem', 'format_filesystem', d.format_filesystem);
-  fillField('f_format_name', 'format_name', d.format_name);
-
-  renderLog(d);
-}
-
-buildTimerRows();
-setInterval(function(){ if (!document.hidden) refresh(); }, 1000);
-setInterval(function(){ if (!document.hidden) paintCountdown(); }, 250);
-refresh();
-</script>
-</body>
-</html>
-"""
 
 
 app = Flask(__name__)
@@ -1607,19 +1051,38 @@ def no_cache(response):
     return response
 
 
+UI_DIR = os.path.join(APP_DIR, "ui")
 _page_cache = {"html": None}
 
 
 def render_page():
-    """Version einmalig in die Seite einsetzen - eine einzige Quelle der Wahrheit."""
+    """Liest ui/index.html einmalig ein und setzt die Version ein."""
     if _page_cache["html"] is None:
-        _page_cache["html"] = HTML_PAGE.replace("{{APP_VERSION}}", APP_VERSION)
+        path = os.path.join(UI_DIR, "index.html")
+        with open(path, "r", encoding="utf-8") as fh:
+            _page_cache["html"] = fh.read().replace("{{APP_VERSION}}", APP_VERSION)
     return _page_cache["html"]
+
+
+def check_ui_files():
+    """Bricht mit klarer Meldung ab, wenn der Ordner ui/ nicht mitkopiert wurde."""
+    missing = [name for name in ("index.html", "style.css", "app.js")
+               if not os.path.isfile(os.path.join(UI_DIR, name))]
+    if missing:
+        raise SystemExit(
+            "Der Ordner 'ui' neben hyperdeck_control.py ist unvollstaendig (fehlt: %s).\n"
+            "Bitte den kompletten Programmordner kopieren, nicht nur die .py-Datei."
+            % ", ".join(missing))
 
 
 @app.route("/")
 def index():
     return Response(render_page(), mimetype="text/html")
+
+
+@app.route("/ui/<path:filename>")
+def ui_file(filename):
+    return send_from_directory(UI_DIR, filename)
 
 
 @app.route("/favicon.ico")
@@ -1655,7 +1118,24 @@ def api_status():
     payload["log_seq"] = newest
     payload["log_reset"] = reset
     payload["app_version"] = APP_VERSION
+    payload["uptime_s"] = int(time.time() - STARTED_AT)
+    payload["backup"] = backup.snapshot()
+    for key in SECRET_KEYS:             # Passwoerter verlassen den Dienst nie
+        payload[key + "_set"] = bool(payload.get(key))
+        payload[key] = ""
     return jsonify(payload)
+
+
+@app.route("/api/log.txt")
+def api_logfile():
+    """Die komplette Logdatei zum Nachlesen oder Weitergeben."""
+    parts = []
+    for name in (LOG_PATH + ".1", LOG_PATH):     # aeltere Generation zuerst
+        if os.path.exists(name):
+            with open(name, "r", encoding="utf-8", errors="replace") as fh:
+                parts.append(fh.read())
+    return Response("".join(parts) or "Noch keine Logdatei vorhanden.\n",
+                    mimetype="text/plain; charset=utf-8")
 
 
 @app.route("/api/command", methods=["POST"])
@@ -1666,11 +1146,36 @@ def api_command():
     if action == "resume_auto":
         set_state(manual_stop=False)
         log("Auto-Record wieder freigegeben.", "ok")
-        jobs.put({"action": "poll"})
+        request_poll()
         return jsonify(ok=True)
 
-    if action not in ("record", "stop", "poll", "format", "reconnect"):
+    if action == "poll":
+        request_poll()
+        return jsonify(ok=True)
+
+    # ---- Sicherung: laeuft im eigenen Thread, braucht die Deck-Queue nicht
+    if action == "backup":
+        slot = data.get("slot_id")
+        scope, reason = None, "manuell"
+        if str(slot) in ("1", "2"):
+            scope = backup.slot_folder(int(slot))
+            reason = "Slot %s" % slot
+            if scope is None:
+                log("Slot %s: Ordner am Deck noch nicht bekannt - es wird alles gesichert."
+                    % slot, "warn")
+        started = backup.request_run(scope=scope, reason=reason)
+        return jsonify(ok=started, error=None if started else "Sicherung läuft bereits")
+    if action == "backup_test":
+        started = backup.request_test()
+        return jsonify(ok=started, error=None if started else "Sicherung läuft bereits")
+    if action == "backup_cancel":
+        backup.cancel()
+        return jsonify(ok=True)
+
+    if action not in ("record", "stop", "format", "reconnect"):
         return jsonify(ok=False, error="Unbekannter Befehl"), 400
+    if jobs.qsize() > 50:
+        return jsonify(ok=False, error="Zu viele Befehle in der Warteschlange"), 429
 
     jobs.put(data)
     return jsonify(ok=True)
@@ -1685,21 +1190,35 @@ def describe_change(key, value):
                 parts.append("%d: %s %s-%s" % (index + 1, describe_days(entry["days"]),
                                                entry["start"], entry["end"]))
         return "Zeitpläne [%s]" % ("; ".join(parts) if parts else "keiner aktiv")
+    if key in SECRET_KEYS:
+        return "%s=%s" % (key, "***" if value else "gelöscht")
     return "%s=%s" % (key, value)
 
 
 @app.route("/api/settings", methods=["POST"])
 def api_settings():
     data = request.get_json(silent=True) or {}
+    # Passwortfelder: leer = unveraendert lassen, "-" = loeschen
+    for key in SECRET_KEYS:
+        if key in data:
+            value = str(data[key])
+            if value == "":
+                del data[key]
+            elif value == "-":
+                data[key] = ""
     changed = update_settings(data)
     if changed:
         log("Einstellungen geändert: %s"
             % ", ".join(describe_change(k, v) for k, v in sorted(changed.items())))
         if "deck_ip" in changed or "deck_port" in changed:
             jobs.put({"action": "reconnect"})
-        else:
-            jobs.put({"action": "poll"})
-    return jsonify(ok=True, changed=changed, settings=get_settings())
+        elif not all(k.startswith("backup_") or k.startswith("deck_ftp") for k in changed):
+            request_poll()
+    settings = get_settings()
+    for key in SECRET_KEYS:
+        settings[key] = ""
+    return jsonify(ok=True, changed={k: ("***" if k in SECRET_KEYS else v)
+                                      for k, v in changed.items()}, settings=settings)
 
 
 # --------------------------------------------------------------------------
@@ -1718,7 +1237,10 @@ def main():
     parser.add_argument("--version", action="version", version="HyperDeck Web Control " + APP_VERSION)
     args = parser.parse_args()
 
+    check_ui_files()
+    setup_file_log()
     load_config()
+    log("HyperDeck Web Control %s gestartet." % APP_VERSION)
     overrides = {}
     if args.ip:
         overrides["deck_ip"] = args.ip
@@ -1731,6 +1253,7 @@ def main():
 
     worker = threading.Thread(target=worker_loop, name="hyperdeck-worker", daemon=True)
     worker.start()
+    backup.start()
 
     cfg = get_settings()
     url = "http://localhost:%d" % args.web_port
@@ -1746,6 +1269,10 @@ def main():
         print("    Autorecord %d: %s  %s-%s Uhr  [%s]" % (
             index + 1, describe_days(entry["days"]), entry["start"], entry["end"],
             "aktiv" if entry["enabled"] else "aus"))
+    target = hyperdeck_backup.make_sink(cfg).describe() or "kein Ziel eingestellt"
+    print("  Sicherung: %s -> %s" % (
+        ("alle %d min" % cfg["backup_interval"]) if cfg["backup_enabled"] else "aus", target))
+    print("  Logdatei:  %s" % LOG_PATH)
     print("=" * 62)
     print("  Dieses Fenster bitte offen lassen. Beenden mit Strg + C.")
     print("=" * 62)
@@ -1755,11 +1282,37 @@ def main():
         open_browser_later(url)
 
     try:
-        app.run(host=args.bind, port=args.web_port, threaded=True,
-                debug=False, use_reloader=False)
+        serve_forever(args.bind, args.web_port)
     finally:
         shutdown.set()
+        backup.stop()
         deck.close()
+
+
+def serve_forever(host, port):
+    """waitress ist ein richtiger Produktionsserver (mehrere Threads, kein
+    Entwicklungs-Warnhinweis, keine Anfrageflut in der Konsole). Fehlt das
+    Paket, laeuft der eingebaute Flask-Server als Ersatz."""
+    try:
+        from waitress import serve as waitress_serve
+    except ImportError:
+        logging.getLogger("werkzeug").setLevel(logging.WARNING)
+        log("Paket 'waitress' fehlt - der Flask-Entwicklungsserver wird benutzt "
+            "(pip install waitress).", "warn")
+        try:
+            app.run(host=host, port=port, threaded=True, debug=False, use_reloader=False)
+        except OSError as exc:
+            print("\nWebserver konnte Port %d nicht oeffnen: %s\n"
+                  "Laeuft das Programm vielleicht schon? Sonst --web-port aendern." % (port, exc))
+            raise
+        return
+    try:
+        waitress_serve(app, host=host, port=port, threads=8,
+                       ident="HyperDeck Web Control", _quiet=True)
+    except OSError as exc:
+        print("\nWebserver konnte Port %d nicht oeffnen: %s\n"
+              "Laeuft das Programm vielleicht schon? Sonst --web-port aendern." % (port, exc))
+        raise
 
 
 def open_browser_later(url, delay=1.5):

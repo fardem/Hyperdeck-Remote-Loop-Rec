@@ -5,7 +5,8 @@ Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Autom
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue?logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/WebUI-Flask-black?logo=flask&logoColor=white)
 ![Hardware](https://img.shields.io/badge/Hardware-BM%20HyperDeck-red)
-![Version](https://img.shields.io/badge/Version-3.0.0-blueviolet)
+![Version](https://img.shields.io/badge/Version-3.1.0-blueviolet)
+![Tests](https://github.com/fardem/Hyperdeck-Remote-Loop-Rec/actions/workflows/tests.yml/badge.svg)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 ---
@@ -19,11 +20,13 @@ Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Autom
 5. [Aufruf der Weboberfläche](#-aufruf-der-weboberfläche)
 6. [Übersicht der Web-UI & Einstellungen](#️-übersicht-der-web-ui--einstellungen)
 7. [Timer-Aufnahme (Zeitsteuerung)](#-timer-aufnahme-zeitsteuerung)
-8. [CLI-Startparameter](#️-cli-startparameter)
-9. [REST-API Dokumentation](#-rest-api-dokumentation)
-10. [Fehlerbehebung (Troubleshooting)](#-fehlerbehebung-troubleshooting)
-11. [Versionierung & Änderungsprotokoll](#-versionierung--änderungsprotokoll)
-12. [Lizenz](#-lizenz)
+8. [Sicherung der Aufnahmen (FTP)](#-sicherung-der-aufnahmen-ftp)
+9. [CLI-Startparameter](#️-cli-startparameter)
+10. [REST-API Dokumentation](#-rest-api-dokumentation)
+11. [Tests](#-tests)
+12. [Fehlerbehebung (Troubleshooting)](#-fehlerbehebung-troubleshooting)
+13. [Versionierung & Änderungsprotokoll](#-versionierung--änderungsprotokoll)
+14. [Lizenz](#-lizenz)
 
 ---
 
@@ -44,6 +47,7 @@ Standardmäßig stoppt ein Blackmagic HyperDeck die Aufnahme, sobald beide einge
 * 🔴 **Auto-Record:** Startet die Aufnahme selbstständig neu, falls das Gerät steht (z. B. nach Signalverlust oder Stromausfall).
 * 🎚️ **Hauptschalter „Loop-Record“:** Schaltet die komplette Endlos-Automatik mit einem Klick aus – das Werkzeug wird dann zur reinen Fernbedienung.
 * ⏰ **Timer-Aufnahme:** Bis zu drei Zeitpläne mit Wochentagen und Uhrzeiten (Vorgabe **Mo–Fr 08:45–18:30 Uhr**). Der Rekorder startet und stoppt ohne Zutun, auch über Mitternacht hinweg.
+* 💾 **Sicherung der Aufnahmen:** Fertige Clips werden über den FTP-Server des HyperDecks auf ein **Netzlaufwerk** (UNC-Pfad, Laufwerksbuchstabe) oder einen **FTP-Server** (NAS) gespiegelt – automatisch im Intervall oder per Knopfdruck, mit Fortschrittsanzeige. Auf Wunsch leert Auto-Loop eine Karte erst, wenn ihre Clips gesichert sind.
 * 🔒 **Manueller Stopp-Schutz (Safety Interlock):** Drückt ein Operator manuell auf „Stopp“, verriegelt sich Auto-Record. Die Automatik funkt nicht eigenmächtig dazwischen, bis sie explizit freigegeben oder eine neue Aufnahme gestartet wird.
 * 🕒 **Timecode-Synchronisation:** Setzt den Start-Timecode des Decks auf Wunsch automatisch auf die aktuelle PC-Systemzeit (`HH:MM:SS:00`).
 * ⚡ **BM-Token-Formatierung:** Vollständige Unterstützung des zweistufigen Blackmagic-Protokolls (`prepare` $\rightarrow$ `Token auslesen` $\rightarrow$ `confirm`) inklusive 180-Sekunden-Cooldown gegen Mehrfach-Löschungen.
@@ -51,6 +55,7 @@ Standardmäßig stoppt ein Blackmagic HyperDeck die Aufnahme, sobald beide einge
 * 💾 **Live-Konfiguration:** Alle Parameter sind im laufenden Betrieb in der Web-UI änderbar und werden persistent in `hyperdeck_config.json` gespeichert.
 * 🚀 **Startet und öffnet sich selbst:** `start.bat` (Windows) bzw. `start.sh` prüft Python, installiert die Abhängigkeiten und startet den Dienst – der Browser geht automatisch mit der richtigen Adresse auf. Das Konsolenfenster bleibt in jedem Fall offen.
 * 🏷️ **Sichtbare Version:** Die laufende Programmversion steht in der Kopf- und Fußzeile der Oberfläche sowie in der Startmeldung der Konsole.
+* 🧱 **Für den Dauerbetrieb gebaut:** Produktions-Webserver (waitress), rotierende Logdatei `hyperdeck.log`, atomar geschriebene Konfiguration, automatisierte Tests bei jedem Push.
 
 ---
 
@@ -88,6 +93,7 @@ Klassische Skripte frieren häufig ein, wenn Web-Anfragen und Überwachungsschle
 └─────────────────────────────────────────────────────────────┘
 
 - **Kein Socket-Konflikt:** Flask redet niemals direkt mit dem Deck, sondern legt Aufträge in eine Queue.
+- **Sicherung getrennt:** Die FTP-Spiegelung läuft in einem eigenen Thread mit eigener Verbindung (Port 21). Sie kann die Steuerverbindung weder blockieren noch stören.
 - **Echter Stream-Parser:** Antworten werden nach 3-stelligen Statuscodes (200 ok, 216 format ready) geparst. Unaufgeforderte asynchrone Statusmeldungen (5xx) werden sauber herausgefiltert.
 - **Lokale Timer-Interpolation:** Der Countdown zur nächsten Abfrage zählt im Browser per JavaScript (`Date.now()`) flüssig herunter, ohne das Netzwerk zu belasten.
 
@@ -96,17 +102,34 @@ Klassische Skripte frieren häufig ein, wenn Web-Anfragen und Überwachungsschle
 
 ## 🚀 Installation & Schnellstart
 
+### Aufbau des Programmordners
+
+```text
+hyperdeck_control.py    Dienst: Deck-Steuerung, Automatik, Timer, Web-API
+hyperdeck_backup.py     Sicherung der Aufnahmen per FTP (eigener Thread)
+ui/                     Weboberfläche (index.html, style.css, app.js)
+start.bat / start.sh    Startdateien
+requirements.txt        Abhängigkeiten (flask, waitress)
+tests/                  automatisierte Tests + HyperDeck-Simulator
+hyperdeck_config.json   wird beim ersten Speichern angelegt
+hyperdeck.log           rotierende Logdatei (1 MB, drei Generationen)
+```
+
+> ⚠️ Immer den **kompletten Ordner** kopieren. Fehlt `ui/` oder `hyperdeck_backup.py`, bricht der Start mit einer klaren Meldung ab.
+
 ### 1. Voraussetzungen
 
 - Python 3.7 oder neuer
 - HyperDeck Studio im selben lokalen Netzwerk wie der Steuer-PC
 - **Wichtig:** Am HyperDeck muss die Option „Remote" (Fernsteuerung) aktiviert sein (Taste auf der Frontblende oder im Gerätemenü).
 
-### 2. Abhängigkeit installieren
+### 2. Abhängigkeiten installieren
 
 ```bash
-pip install flask
+pip install -r requirements.txt
 ```
+
+(`flask` für die Oberfläche, `waitress` als Produktions-Webserver – fehlt waitress, läuft der Flask-Entwicklungsserver als Ersatz.)
 
 ### 3. Skript starten
 
@@ -172,6 +195,7 @@ Die Weboberfläche ist in funktionale Bereiche gegliedert:
 - Zeigt den Einhänge-Status (`mounted`, `empty`) und den Volume-Namen.
 - Visualisiert die verbleibende Aufnahmezeit in Minuten inklusive farbigem Fortschrittsbalken (grün = OK, orange = Schwellenwert unterschritten).
 - Button **„Karte leeren"**: Manuelle Formatierung des Slots per Sicherheitsabfrage.
+- Button **„Karte sichern"** (sobald ein Sicherungsziel eingestellt ist): Kopiert die fertigen Clips dieses Slots ins Ziel.
 
 ### 3. Direkte Steuerung (Buttons)
 
@@ -190,6 +214,8 @@ Die Weboberfläche ist in funktionale Bereiche gegliedert:
 | **Auto-Loop** | Formatiert die inaktive Karte rechtzeitig vor Kartenüberlauf. |
 | **Timecode auf Uhrzeit** | Synchronisiert den Startzeitcode mit der PC-Systemzeit (`HH:MM:SS:00`). |
 | **Timer aktiv** | Schaltet die Zeitsteuerung scharf (siehe nächster Abschnitt). |
+| **Automatisch sichern** | Spiegelt fertige Clips im eingestellten Intervall ins Sicherungsziel. |
+| **Karte erst leeren, wenn gesichert** | Auto-Loop wartet mit dem Formatieren, bis die Clips der Karte gesichert sind. |
 
 ### 5. Parameter-Konfiguration (mit Speicher-Button)
 
@@ -250,6 +276,66 @@ zusätzlich oben ein grüner Hinweisbalken.
 
 ---
 
+## 💾 Sicherung der Aufnahmen (FTP)
+
+Der HyperDeck stellt seine Karten über einen **eingebauten FTP-Server** bereit
+(Port 21, anonym, Übertragung auch während der Aufnahme – das Deck drosselt
+selbst). Das Panel **Sicherung der Aufnahmen** spiegelt die fertigen Clips von
+dort in ein Ziel deiner Wahl:
+
+| Ziel | Einstellung | Beispiel |
+| --- | --- | --- |
+| **Ordner / Netzlaufwerk** | Zielordner | `Z:\HyperDeck` oder `\\NAS\Aufnahmen\Deck1` (UNC) |
+| **FTP-Server** | Server, Port, Benutzer, Passwort, Ordner | NAS mit FTP-Dienst, `/Aufnahmen/Deck1` |
+
+### So läuft ein Sicherungslauf ab
+
+1. Die Dateiliste des Decks wird gelesen (`sd1`, `sd2`, … – die Ordnernamen
+   hängen vom Modell ab, z. B. auch `1`/`2` oder `cfast1`/`cfast2`).
+2. Nur **fertige** Clips werden kopiert: Eine Datei gilt als fertig, wenn ihre
+   Größe 20 Sekunden lang unverändert bleibt. Während das Deck aufnimmt, wird
+   zusätzlich die jüngste Datei des aktiven Slots ausgelassen.
+3. Jeder Clip bekommt den Aufnahmezeitpunkt vorangestellt:
+   `sd1/2026-09-12_09-00-13_HyperDeck_0001.mov`. Der HyperDeck zählt nach
+   jedem Formatieren wieder bei `0001` – ohne Zeitstempel würden sich Clips
+   gegenseitig überschreiben. Gleicher Name bei anderer Größe → Größe wird
+   angehängt. **Es wird nie überschrieben und am Deck nie gelöscht.**
+4. Kopiert wird in eine `.part`-Datei, die erst nach vollständiger und
+   größengeprüfter Übertragung umbenannt wird. Ein Abbruch hinterlässt keine
+   halben Clips unter echtem Namen.
+5. Bereits vorhandene Clips (gleicher Name, gleiche Größe) werden übersprungen –
+   ein Lauf kostet also nur so viel, wie neu dazugekommen ist.
+
+### Bedienung
+
+| Element | Bedeutung |
+| --- | --- |
+| **Automatisch sichern** | Läuft alle *n* Minuten (Feld „Alle … Minuten prüfen“, Vorgabe 15). |
+| **Karte erst leeren, wenn gesichert** | Auto-Loop formatiert die inaktive Karte erst, wenn ein Sicherungslauf ohne offene Dateien höchstens 15 Minuten zurückliegt; sonst wird sofort ein Lauf angestoßen und gewartet. Ist das Ziel dauerhaft nicht erreichbar, bleibt die Karte voll und das Log meldet es – **Daten gehen vor Endlosschleife.** Schalter aus = Sicherung ist „nur“ Komfort, die Schleife läuft immer. |
+| **Jetzt sichern** | Sofortiger Lauf über alle Ordner. |
+| **Karte sichern** (im Slot) | Nur die Clips dieses Slots. |
+| **Verbindung testen** | Prüft Deck-FTP (Anzahl Dateien, Größe, Ordner) und ob das Ziel beschreibbar ist. |
+| **Abbrechen** | Bricht den laufenden Lauf ab; die aktuelle `.part`-Datei wird entfernt. |
+| Statusblock | Phase, Datei, Fortschritt, Geschwindigkeit, letztes Ergebnis, nächster Lauf, Inhalt des Decks. |
+
+### Hinweise für den Betrieb
+
+- **Netzlaufwerk unter Windows:** Laufwerksbuchstaben gelten nur für den
+  angemeldeten Benutzer. Läuft das Programm unter einem anderen Konto oder als
+  Dienst, den **UNC-Pfad** eintragen (`\\NAS\Freigabe\Ordner`) und
+  sicherstellen, dass dieses Konto Schreibrechte hat.
+- **Passwörter** werden in `hyperdeck_config.json` im Klartext gespeichert
+  (wie bei jedem FTP-Client), verlassen den Dienst aber nie: die Oberfläche und
+  die API zeigen sie nicht an. Leeres Passwortfeld = unverändert, `-` = löschen.
+- **Zeitstempel** im Dateinamen kommen vom Deck (dessen Uhr/Zeitzone).
+- Große Karten dauern: bei ~30 MB/s braucht eine volle 256-GB-Karte gut zwei
+  Stunden. Deshalb läuft die Sicherung besser laufend im Intervall als „einmal
+  am Ende“.
+- Bei einem Lauf mit Fehlern (Ziel voll, Netz weg) bleiben die betroffenen
+  Clips „offen“ und werden beim nächsten Lauf erneut versucht.
+
+---
+
 ## ⌨️ CLI-Startparameter
 
 Beim Start können Parameter übergeben werden, die die gespeicherten Einstellungen temporär überschreiben:
@@ -267,6 +353,15 @@ python hyperdeck_control.py [OPTIONEN]
 | `--bind` | String | `0.0.0.0` | Netzwerk-Bind-Adresse des Webservers |
 | `--no-browser` | Flag | aus | Browser beim Start **nicht** automatisch öffnen |
 | `--version` | Flag | – | Gibt die Programmversion aus und beendet sich |
+
+Umgebungsvariable **`HYPERDECK_HOME`**: Ordner für `hyperdeck_config.json` und
+`hyperdeck.log` (Standard: Programmordner). Damit lassen sich **zwei Decks mit
+zwei Instanzen** betreiben:
+
+```bat
+set HYPERDECK_HOME=C:\HyperDeck\Deck2
+python hyperdeck_control.py --ip 172.17.100.120 --web-port 5001
+```
 
 ---
 
@@ -296,6 +391,11 @@ GET /api/status?since=42
 | `log_reset` | `true` = der Client muss sein Log leeren (z. B. nach einem Neustart des Dienstes) |
 | `timer_active` | Nummer (1–3) des laufenden Zeitplans, sonst `null` |
 | `timer_info` | Klartext für die Anzeige |
+| `backup` | Zustand der Sicherung: `running`, `phase`, `current`, `files_done`/`files_total`, `bytes_done`/`bytes_total`, `speed`, `pending`, `last_run`, `last_result`, `error`, `next_run_s`, `last_test`, `tree` |
+| `uptime_s` | Laufzeit des Dienstes in Sekunden |
+| `*_pass_set` | `true`, wenn ein Passwort hinterlegt ist – das Passwort selbst wird nie ausgegeben |
+
+Die komplette Logdatei gibt es als Text unter `GET /api/log.txt`.
 
 ### 2. Befehl senden
 
@@ -321,6 +421,12 @@ POST /api/command
 
 // Socket neu verbinden
 {"action": "reconnect"}
+
+// Sicherung: alles, nur Slot 2, Verbindungstest, Abbruch
+{"action": "backup"}
+{"action": "backup", "slot_id": 2}
+{"action": "backup_test"}
+{"action": "backup_cancel"}
 ```
 
 ### 3. Einstellungen ändern
@@ -356,6 +462,36 @@ Zeitpläne setzen (die Liste enthält immer alle drei Einträge, `days`: 0 = Mon
 > Alle Werte werden serverseitig geprüft und normalisiert: aus `"8:45"` wird
 > `"08:45"`, unsinnige Angaben fallen auf die Vorgabe zurück.
 
+Sicherung einrichten (Netzlaufwerk bzw. FTP-Server):
+
+```json
+{"backup_enabled": true, "backup_interval": 15, "backup_mode": "folder",
+ "backup_folder": "\\\\NAS\\Aufnahmen\\Deck1", "backup_block_format": true}
+```
+
+```json
+{"backup_mode": "ftp", "backup_ftp_host": "nas.local", "backup_ftp_port": 21,
+ "backup_ftp_user": "hyperdeck", "backup_ftp_pass": "geheim", "backup_ftp_path": "/Aufnahmen/Deck1"}
+```
+
+---
+
+## 🧪 Tests
+
+```bash
+pip install -r requirements.txt pyftpdlib pytest
+pytest -q tests/
+```
+
+| Datei | Prüft |
+| --- | --- |
+| `tests/test_timer.py` | Zeitplan-Logik und Zustandsautomat (Fenster, Mitternacht, Verriegelung, Nachholen) |
+| `tests/test_backup.py` | FTP-Sicherung gegen zwei lokale FTP-Server (Wachsen, Kollisionen, FTP-Ziel, Abbruch, Fehler) |
+| `tests/test_api.py` | Dienst + simuliertes Deck, komplett über die API |
+| `tests/fake_deck.py` | HyperDeck-Simulator – auch zum Ausprobieren der Oberfläche ohne Gerät |
+
+Die GitHub Action `.github/workflows/tests.yml` führt alles bei jedem Push aus.
+
 ---
 
 ## 🔍 Fehlerbehebung (Troubleshooting)
@@ -370,6 +506,10 @@ Zeitpläne setzen (die Liste enthält immer alle drei Einträge, `days`: 0 = Mon
 | Timer stoppt nicht | Ein zweiter Zeitplan überlappt das Fenster. | Zeitpläne auf Überschneidungen prüfen. |
 | Fenster schließt sich sofort | Python fehlt oder ist nicht im PATH. | `start.bat` benutzen – es zeigt die Ursache an und bleibt offen. |
 | Uhrzeitfelder zeigen AM/PM | Anzeigeformat des Browsers/Systems. | Nur die Anzeige, gespeichert wird immer 24-Stunden-Zeit. Systemsprache auf Deutsch stellen. |
+| Sicherung: „Deck-FTP FEHLER“ | FTP am Deck nicht erreichbar (Port 21 gesperrt, Deck aus, falsche IP). | Im Browser `ftp://<DECK-IP>` öffnen bzw. mit FileZilla testen. Firewall am PC prüfen. |
+| Sicherung: „Ziel FEHLER“ | Ordner nicht beschreibbar, Laufwerksbuchstabe für dieses Konto nicht vorhanden, FTP-Login falsch. | UNC-Pfad statt Laufwerksbuchstabe; Rechte des Kontos prüfen; „Verbindung testen“ nutzen. |
+| Karte wird nicht geleert, Log meldet „wartet auf Sicherung“ | „Karte erst leeren, wenn gesichert“ ist an und die Sicherung kommt nicht durch. | Ziel reparieren – oder den Schalter ausschalten, wenn die Schleife wichtiger ist als die Daten. |
+| Clip fehlt im Ziel | Datei wuchs noch (läuft), oder sie ist die jüngste des aufnehmenden Slots. | Kommt beim nächsten Lauf, sobald der Clip abgeschlossen ist. |
 
 ---
 
@@ -378,7 +518,7 @@ Zeitpläne setzen (die Liste enthält immer alle drei Einträge, `days`: 0 = Mon
 Das Projekt folgt der [Semantischen Versionierung](https://semver.org/lang/de/)
 (**MAJOR.MINOR.PATCH**). Die laufende Version steht
 
-- oben rechts in der Kopfzeile der Weboberfläche (z. B. `v3.0.0`),
+- oben rechts in der Kopfzeile der Weboberfläche (z. B. `v3.1.0`),
 - in der Fußzeile unter dem Ereignis-Log,
 - in der Startmeldung des Konsolenfensters,
 - in `hyperdeck_control.py` in der Konstanten `APP_VERSION`,
@@ -390,8 +530,8 @@ Bei einer neuen Version zusätzlich auf GitHub einen Tag und ein Release anlegen
 dann ist die Version auch dort sichtbar und herunterladbar:
 
 ```bash
-git tag -a v3.0.0 -m "Timer-Aufnahme, Loop-Hauptschalter, Autostart"
-git push origin v3.0.0
+git tag -a v3.1.0 -m "Sicherung per FTP, Produktionsserver, Tests"
+git push origin v3.1.0
 ```
 
 ---

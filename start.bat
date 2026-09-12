@@ -23,6 +23,17 @@ echo   HyperDeck Web Control wird gestartet
 echo ============================================================
 echo.
 
+rem ---------- 0. Programmordner vollstaendig? ----------------------------
+if not exist "ui\index.html" (
+  echo [FEHLER] Der Ordner "ui" fehlt neben dieser Datei.
+  echo          Bitte den kompletten Programmordner kopieren, nicht nur einzelne Dateien.
+  goto :ende
+)
+if not exist "hyperdeck_backup.py" (
+  echo [FEHLER] Die Datei hyperdeck_backup.py fehlt neben dieser Datei.
+  goto :ende
+)
+
 rem ---------- 1. Python suchen -------------------------------------------
 set "PY="
 py -3 --version >nul 2>&1
@@ -45,7 +56,7 @@ echo [1/3] Python gefunden:
 echo.
 
 rem ---------- 2. Abhaengigkeiten ------------------------------------------
-echo [2/3] Abhaengigkeiten pruefen (flask) ...
+echo [2/3] Abhaengigkeiten pruefen (flask, waitress) ...
 %PY% -m pip install -r requirements.txt --disable-pip-version-check
 if errorlevel 1 (
   echo.

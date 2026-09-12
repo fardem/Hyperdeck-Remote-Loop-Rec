@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HyperDeck Control</title>
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Kopf: Geraet, Version, Verbindung, Tally, Timecode, Countdown -->
+  <div class="panel">
+    <div class="top">
+      <div>
+        <h1><span id="device">HyperDeck Control</span><span class="badge" id="ver">v{{APP_VERSION}}</span></h1>
+        <div class="host" id="host">--</div>
+      </div>
+      <div class="link"><span class="dot" id="dot"></span><span id="linkTxt">Verbinde …</span></div>
+    </div>
+
+    <div class="stage" style="margin-top:18px">
+      <div class="tally" id="tally">
+        <div class="word" id="tallyWord">--</div>
+        <div class="sub" id="tallySub">Status</div>
+      </div>
+      <div>
+        <div class="tc" id="tc">--:--:--:--</div>
+        <div class="tc-label" id="tcLabel">Timecode</div>
+      </div>
+    </div>
+
+    <div class="poll">
+      <span>Nächste Abfrage in <b id="cd" style="color:var(--txt);font-family:var(--mono)">--</b> s</span>
+      <div class="track2"><span id="cdBar" style="width:100%"></span></div>
+      <span id="lastPoll"></span>
+    </div>
+  </div>
+
+  <!-- Hinweisleisten -->
+  <div id="noticeTimer" class="notice timer" hidden><span id="timerTxt"></span></div>
+  <div id="noticeLock" class="notice lock" hidden>
+    <span>Manuell gestoppt. Auto-Record bleibt aus, bis du ihn freigibst.</span>
+    <button class="b-warn b-sm" onclick="send('resume_auto')">Auto-Record freigeben</button>
+  </div>
+  <div id="noticeBusy" class="notice busy" hidden><span id="busyTxt"></span></div>
+  <div id="noticeErr" class="notice err" hidden><span id="errTxt"></span></div>
+
+  <!-- Karten -->
+  <div class="slots" id="slots"></div>
+
+  <!-- Bedienung -->
+  <div class="panel">
+    <div class="eyebrow">Bedienung</div>
+    <div class="buttons">
+      <button class="b-rec" onclick="send('record')">Aufnahme starten</button>
+      <button onclick="send('stop')">Aufnahme stoppen</button>
+      <button class="b-ghost" onclick="send('poll')">Jetzt abfragen</button>
+      <button class="b-ghost" onclick="send('reconnect')">Neu verbinden</button>
+    </div>
+
+    <div class="switches">
+      <label class="sw">
+        <div><div class="t">Loop-Record</div><div class="d">Hauptschalter: aus = keinerlei Automatik</div></div>
+        <input type="checkbox" id="sw_loop_record" onchange="setFlag('loop_record',this.checked)">
+        <span class="track" id="tr_loop_record"></span>
+      </label>
+      <label class="sw">
+        <div><div class="t">Auto-Record</div><div class="d" id="autoRecHint">Startet die Aufnahme neu, wenn das Deck steht</div></div>
+        <input type="checkbox" id="sw_auto_record" onchange="setFlag('auto_record',this.checked)">
+        <span class="track" id="tr_auto_record"></span>
+      </label>
+      <label class="sw">
+        <div><div class="t">Auto-Loop</div><div class="d">Formatiert die inaktive Karte rechtzeitig</div></div>
+        <input type="checkbox" id="sw_auto_loop" onchange="setFlag('auto_loop',this.checked)">
+        <span class="track" id="tr_auto_loop"></span>
+      </label>
+      <label class="sw">
+        <div><div class="t">Timecode auf Uhrzeit</div><div class="d">Setzt den Startzeitcode auf die Systemzeit</div></div>
+        <input type="checkbox" id="sw_sync_timecode" onchange="setFlag('sync_timecode',this.checked)">
+        <span class="track" id="tr_sync_timecode"></span>
+      </label>
+    </div>
+  </div>
+
+  <!-- Timer -->
+  <div class="panel">
+    <div class="eyebrow">Timer-Aufnahme</div>
+    <div class="switches" style="margin-top:0">
+      <label class="sw">
+        <div><div class="t">Timer aktiv</div><div class="d">Startet und stoppt zur eingestellten Uhrzeit</div></div>
+        <input type="checkbox" id="sw_timer_enabled" onchange="setFlag('timer_enabled',this.checked)">
+        <span class="track" id="tr_timer_enabled"></span>
+      </label>
+      <div class="sw">
+        <div><div class="t">Anzahl Zeitpläne</div><div class="d">1 bis 3 Einträge</div></div>
+        <select id="timerCount" class="mini-select" onchange="setCount(this.value)">
+          <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="hint" id="timerState" style="margin-top:14px">Timer aus</div>
+    <div id="timerRows"></div>
+
+    <div class="row">
+      <button onclick="saveTimers()">Zeitpläne speichern</button>
+      <button class="b-ghost b-sm" onclick="discardTimers()">Verwerfen</button>
+      <span class="hint" id="timerHint">Uhrzeiten wirken sofort nach dem Speichern.</span>
+    </div>
+  </div>
+
+  <!-- Sicherung -->
+  <div class="panel">
+    <div class="eyebrow">Sicherung der Aufnahmen</div>
+    <div class="switches" style="margin-top:0">
+      <label class="sw">
+        <div><div class="t">Automatisch sichern</div><div class="d" id="bkAutoHint">Kopiert fertige Clips regelmäßig vom Deck ins Ziel</div></div>
+        <input type="checkbox" id="sw_backup_enabled" onchange="setFlag('backup_enabled',this.checked)">
+        <span class="track" id="tr_backup_enabled"></span>
+      </label>
+      <label class="sw">
+        <div><div class="t">Karte erst leeren, wenn gesichert</div><div class="d">Auto-Loop wartet auf die Sicherung</div></div>
+        <input type="checkbox" id="sw_backup_block_format" onchange="setFlag('backup_block_format',this.checked)">
+        <span class="track" id="tr_backup_block_format"></span>
+      </label>
+    </div>
+
+    <div class="bk-status" id="bkStatus">
+      <div class="bk-line"><b id="bkPhase">Bereit</b><span id="bkDetail"></span></div>
+      <div class="bar"><span id="bkBar" style="width:0%"></span></div>
+      <div class="meta"><span id="bkFile"></span><span id="bkSpeed"></span></div>
+    </div>
+    <div class="hint multi" id="bkLast"></div>
+    <div class="hint" id="bkTree"></div>
+
+    <div class="buttons" style="margin-top:12px">
+      <button onclick="send('backup')">Jetzt sichern</button>
+      <button class="b-ghost" onclick="send('backup_test')">Verbindung testen</button>
+      <button class="b-warn" id="bkCancel" onclick="send('backup_cancel')" hidden>Abbrechen</button>
+    </div>
+
+    <div class="fields" style="margin-top:16px">
+      <div class="field">
+        <label for="f_backup_mode">Ziel</label>
+        <select id="f_backup_mode" data-key="backup_mode" onchange="updateBackupMode()">
+          <option value="folder">Ordner / Netzlaufwerk</option>
+          <option value="ftp">FTP-Server</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="f_backup_interval">Alle … Minuten prüfen</label>
+        <input id="f_backup_interval" data-key="backup_interval" type="number" min="1" max="1440">
+      </div>
+      <div class="field wide" id="bkFolderWrap">
+        <label for="f_backup_folder">Zielordner (auch UNC-Pfad)</label>
+        <input id="f_backup_folder" data-key="backup_folder" type="text" placeholder="Z:\HyperDeck  oder  \\NAS\Aufnahmen\Deck1">
+      </div>
+      <div class="field wide" id="bkFtpWrap" hidden>
+        <div class="fields">
+          <div class="field">
+            <label for="f_backup_ftp_host">FTP-Server</label>
+            <input id="f_backup_ftp_host" data-key="backup_ftp_host" type="text" placeholder="nas.local oder 192.168.1.20">
+          </div>
+          <div class="field">
+            <label for="f_backup_ftp_port">Port</label>
+            <input id="f_backup_ftp_port" data-key="backup_ftp_port" type="number" min="1" max="65535">
+          </div>
+          <div class="field">
+            <label for="f_backup_ftp_user">Benutzer</label>
+            <input id="f_backup_ftp_user" data-key="backup_ftp_user" type="text" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="f_backup_ftp_pass">Passwort</label>
+            <input id="f_backup_ftp_pass" data-key="backup_ftp_pass" type="password" autocomplete="new-password" placeholder="Passwort">
+          </div>
+          <div class="field">
+            <label for="f_backup_ftp_path">Ordner auf dem Server</label>
+            <input id="f_backup_ftp_path" data-key="backup_ftp_path" type="text" placeholder="/Aufnahmen/Deck1">
+          </div>
+        </div>
+      </div>
+      <div class="field">
+        <label for="f_backup_source_path">Startordner am Deck</label>
+        <input id="f_backup_source_path" data-key="backup_source_path" type="text" placeholder="/">
+      </div>
+      <div class="field">
+        <label for="f_deck_ftp_port">FTP-Port des Decks</label>
+        <input id="f_deck_ftp_port" data-key="deck_ftp_port" type="number" min="1" max="65535">
+      </div>
+      <div class="field">
+        <label for="f_deck_ftp_user">Deck-FTP Benutzer (leer = anonym)</label>
+        <input id="f_deck_ftp_user" data-key="deck_ftp_user" type="text" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="f_deck_ftp_pass">Deck-FTP Passwort</label>
+        <input id="f_deck_ftp_pass" data-key="deck_ftp_pass" type="password" autocomplete="new-password" placeholder="Passwort">
+      </div>
+    </div>
+    <div class="row">
+      <button onclick="saveSettings('bkSaveHint')">Sicherung speichern</button>
+      <span class="hint" id="bkSaveHint">Dateien werden nie überschrieben oder am Deck gelöscht.</span>
+    </div>
+  </div>
+
+  <!-- Einstellungen -->
+  <div class="panel">
+    <div class="eyebrow">Einstellungen</div>
+    <div class="fields">
+      <div class="field">
+        <label for="f_deck_ip">Deck-IP</label>
+        <input id="f_deck_ip" data-key="deck_ip" type="text" inputmode="decimal">
+      </div>
+      <div class="field">
+        <label for="f_deck_port">Deck-Port</label>
+        <input id="f_deck_port" data-key="deck_port" type="number" min="1" max="65535">
+      </div>
+      <div class="field">
+        <label for="f_check_interval">Abfrage alle … Sekunden</label>
+        <input id="f_check_interval" data-key="check_interval" type="number" min="5" max="3600">
+      </div>
+      <div class="field">
+        <label for="f_min_remaining_threshold">Vorbereiten ab … Minuten Rest</label>
+        <input id="f_min_remaining_threshold" data-key="min_remaining_threshold" type="number" min="1" max="240">
+      </div>
+      <div class="field">
+        <label for="f_inactive_min_free">Karte leeren unter … Minuten frei</label>
+        <input id="f_inactive_min_free" data-key="inactive_min_free" type="number" min="1" max="2000">
+      </div>
+      <div class="field">
+        <label for="f_format_filesystem">Dateisystem</label>
+        <select id="f_format_filesystem" data-key="format_filesystem">
+          <option value="exFAT">exFAT</option>
+          <option value="HFS+">HFS+</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="f_format_name">Datenträgername</label>
+        <input id="f_format_name" data-key="format_name" type="text">
+      </div>
+    </div>
+    <div class="row">
+      <button onclick="saveSettings('saveHint')">Einstellungen speichern</button>
+      <span class="hint" id="saveHint">Werden in hyperdeck_config.json gesichert.</span>
+    </div>
+  </div>
+
+  <!-- Ereignisse -->
+  <div class="panel">
+    <div class="eyebrow">Ereignisse</div>
+    <div class="log" id="log"></div>
+    <div class="hint foot">
+      <span id="foot">HyperDeck Web Control v{{APP_VERSION}}</span>
+      <span><span id="uptime"></span> · <a href="/api/log.txt" target="_blank" rel="noopener">Vollständiges Protokoll</a></span>
+    </div>
+  </div>
+
+</div>
+<script src="/ui/app.js"></script>
+</body>
+</html>

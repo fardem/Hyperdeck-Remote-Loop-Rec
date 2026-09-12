@@ -13,6 +13,50 @@ PATCH bei Fehlerbehebungen.
 
 ---
 
+## [3.1.0] – 2026-09-12
+
+### Neu
+- **Sicherung der Aufnahmen per FTP** (`hyperdeck_backup.py`). Fertige Clips
+  werden vom eingebauten FTP-Server des HyperDecks auf ein Netzlaufwerk
+  (Ordner/UNC-Pfad) oder einen FTP-Server (NAS) gespiegelt – automatisch im
+  Intervall, per „Jetzt sichern“ oder je Slot („Karte sichern“). Mit
+  Fortschrittsanzeige, Abbruch, Verbindungstest und Anzeige des Deck-Inhalts.
+  Zieldateien tragen den Aufnahmezeitpunkt im Namen, nichts wird überschrieben
+  oder am Deck gelöscht; laufende Aufnahmen werden erkannt und ausgelassen.
+- **„Karte erst leeren, wenn gesichert“**: Auto-Loop wartet mit dem
+  Formatieren, bis die Clips der Karte gesichert sind.
+- **Produktions-Webserver** `waitress` (kein Entwicklungs-Warnhinweis, keine
+  Anfrageflut in der Konsole); der Flask-Server bleibt als Ersatz.
+- **Rotierende Logdatei** `hyperdeck.log` (1 MB × 3) neben der Konfiguration,
+  abrufbar über `/api/log.txt` und den Link „Vollständiges Protokoll“.
+- **`HYPERDECK_HOME`**: eigener Ordner für Konfiguration und Log, z. B. für
+  eine zweite Instanz mit einem zweiten Deck.
+- **Automatisierte Tests** (`tests/`) mit HyperDeck-Simulator und GitHub Action.
+- Oberfläche: Tab-Titel zeigt „● REC“, Laufzeit des Dienstes in der Fußzeile,
+  Hinweis unter Auto-Record, solange der Timer das Sagen hat,
+  „Nicht gespeichert“-Hinweis auch für die Einstellungen, Rückmeldungen als
+  kurze Einblendung statt stiller Fehler.
+
+### Geändert
+- **Programmordner statt Einzeldatei.** Die Oberfläche liegt jetzt in `ui/`
+  (`index.html`, `style.css`, `app.js`) statt als Text im Python-Skript. Beim
+  Kopieren immer den ganzen Ordner mitnehmen – fehlt etwas, sagt der Start
+  klar, was fehlt.
+- Konfiguration wird atomar geschrieben (Temporärdatei + Umbenennen): ein
+  Absturz beim Speichern hinterlässt keine kaputte `hyperdeck_config.json`.
+- Mehrfaches „Jetzt abfragen“ wird zu einer Abfrage zusammengefasst; die
+  Befehlswarteschlange ist begrenzt.
+- Auswahlfelder werden serverseitig geprüft (nur erlaubte Werte).
+- Passwörter verlassen den Dienst nie: API und Oberfläche zeigen nur, *ob*
+  eines hinterlegt ist.
+
+### Behoben
+- Sicherung: Nach einer Verzeichnisliste stand die FTP-Verbindung im
+  ASCII-Modus; Clips wären beim Kopieren verändert worden. Vor jedem Transfer
+  wird jetzt ausdrücklich in den Binärmodus geschaltet und die Größe geprüft.
+
+---
+
 ## [3.0.0] – 2026-09-10
 
 ### Neu

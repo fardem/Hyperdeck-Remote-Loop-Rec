@@ -13,6 +13,23 @@ PATCH bei Fehlerbehebungen.
 
 ---
 
+## [3.3.1] – 2026-09-12
+
+### Behoben
+- **Eine nie gesicherte Karte konnte als „gesichert" durchgehen.** Die Prüfung
+  vor dem Formatieren sah nur, *ob* zuletzt ein Lauf ohne offene Dateien
+  stattfand – nicht, *welche* Karte dieser Lauf abgedeckt hatte. Ein gezielter
+  Lauf für Slot 1 ließ damit auch Slot 2 als sauber gelten, und Slot 2 wäre
+  geleert worden, ohne je gesichert worden zu sein. Trifft nur bei
+  eingeschaltetem „Karte erst leeren, wenn gesichert" und ausgeschalteter
+  automatischer Sicherung zu. Der Lauf merkt sich jetzt seinen Umfang.
+
+### Dokumentation
+- README erklärt mit Ablaufbild, **wann welche Karte** gesichert wird und dass
+  laufend während der Aufnahme gesichert wird – nicht erst beim Kartenwechsel.
+
+---
+
 ## [3.3.0] – 2026-09-12
 
 ### Neu

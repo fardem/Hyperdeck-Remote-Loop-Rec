@@ -579,6 +579,7 @@ class Mirror(object):
         self._last_error_at = 0.0
         self._last_run_mono = None
         self._clean_at_mono = None      # letzter Lauf ohne offene Dateien
+        self._clean_scope = None        # welchen Ordner dieser Lauf abgedeckt hat
         self._pending_paths = set()
         self._top_folders = []
         self.thread = None
@@ -649,13 +650,17 @@ class Mirror(object):
         return None
 
     def is_clean(self, max_age_s, slot_id=None):
-        """True, wenn der letzte vollstaendige Lauf juenger als max_age_s ist und
-        keine Datei (des Slots) offen blieb."""
+        """True, wenn der letzte Lauf jung genug ist, diesen Slot ueberhaupt
+        angesehen hat und dabei keine Datei offen blieb.
+
+        Der Blick auf den Slot ist wichtig: Ein Lauf, der nur Slot 1 abgedeckt
+        hat, sagt nichts ueber Slot 2 aus - ohne diese Pruefung wuerde eine nie
+        gesicherte Karte als "sauber" durchgehen und geleert werden."""
         if self._clean_at_mono is None or time.monotonic() - self._clean_at_mono > max_age_s:
             return False
-        if slot_id is None:
-            return not self._pending_paths
-        folder = self.slot_folder(slot_id)
+        folder = self.slot_folder(slot_id) if slot_id is not None else None
+        if self._clean_scope is not None and self._clean_scope != folder:
+            return False                # der letzte Lauf ging um einen anderen Ordner
         if folder is None:
             return not self._pending_paths
         return not any(p.split("/", 1)[0] == folder for p in self._pending_paths)
@@ -872,6 +877,7 @@ class Mirror(object):
                     n_files(copied), human_size(copied_bytes), took, len(unsure))
                 if not unsure or scope is None:
                     self._clean_at_mono = time.monotonic()
+                    self._clean_scope = scope
                 if copied:
                     self.log("Sicherung fertig: " + result, "ok")
             stamp = datetime.datetime.now().strftime("%H:%M:%S")

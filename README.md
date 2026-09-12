@@ -309,6 +309,37 @@ Bei jedem Verdacht auf einen verschobenen Dialog wird die Verbindung deshalb
 weggeworfen und neu aufgebaut. Geht doch etwas schief, steht der komplette
 FTP-Dialog im Ereignis-Log.
 
+### Wann wird welche Karte gesichert?
+
+Es gibt **drei** Auslöser – und keiner davon wartet auf den Kartenwechsel:
+
+| Auslöser | Umfang | Wann |
+| --- | --- | --- |
+| **Automatisch sichern** | beide Karten | alle *n* Minuten, laufend im Betrieb |
+| **Karte erst leeren, wenn gesichert** | nur die zu leerende Karte | unmittelbar bevor Auto-Loop sie formatieren würde |
+| **„Jetzt sichern" / „Karte sichern"** | alles bzw. eine Karte | auf Knopfdruck |
+
+Im Ringbetrieb sieht das so aus:
+
+```text
+Deck nimmt auf Karte A auf
+  └─ Intervall-Lauf sichert: alle FERTIGEN Clips auf A  +  alles auf B
+     (der gerade laufende Clip auf A bleibt liegen – er wächst noch)
+
+Karte A ist voll → Deck schaltet auf B
+  └─ jetzt ist auch A's letzter Clip fertig und wird beim nächsten Lauf geholt
+
+Karte B wird knapp → Auto-Loop will A leeren
+  └─ prüft: sind A's Clips gesichert?
+       ja   → A wird formatiert
+       nein → Sicherungslauf nur für A, Formatieren wird verschoben
+```
+
+**Entscheidend:** Gesichert wird *während* der Aufnahme, nicht erst beim
+Umschalten. Geleert wird immer nur die **inaktive** Karte – und zwischen
+„Umschalten von A auf B" und „A wird geleert" liegt die gesamte Laufzeit von B,
+also Stunden. Puffer ist reichlich.
+
 ### So läuft ein Sicherungslauf ab
 
 1. Die Dateiliste des Decks wird gelesen (`sd1`, `sd2`, … – die Ordnernamen

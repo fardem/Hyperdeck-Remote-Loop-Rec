@@ -63,7 +63,7 @@ except ImportError:
 # Konfiguration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "3.3.0"       # wird in der Web-Oberflaeche und im Log angezeigt
+APP_VERSION = "3.3.1"       # wird in der Web-Oberflaeche und im Log angezeigt
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # Ablage fuer Konfiguration und Logdatei. Ueber die Umgebungsvariable
 # HYPERDECK_HOME laesst sich ein anderer Ordner waehlen - z. B. fuer eine

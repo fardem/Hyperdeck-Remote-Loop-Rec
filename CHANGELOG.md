@@ -13,6 +13,45 @@ PATCH bei Fehlerbehebungen.
 
 ---
 
+## [3.2.0] – 2026-09-12
+
+### Neu
+- **Das Deck meldet Änderungen selbst.** Nach dem Verbinden werden
+  `notify: transport: true` und `notify: slot: true` abonniert. Die
+  asynchronen `508 transport info:` und `502 slot info:` werden jetzt
+  verarbeitet, statt verworfen zu werden. Endet eine Aufnahme oder wechselt
+  eine Karte, greift die Automatik **in unter einer Sekunde** – vorher konnte
+  es bis zur nächsten Abfrage dauern. Die regelmäßige Abfrage bleibt als
+  Sicherheitsnetz; kann ein Deck kein `notify`, läuft alles wie bisher.
+- Die Automatik sieht zusätzlich **jede Sekunde** nach, damit eine
+  Wiederholsperre (Auto-Record, Timer) keinen Auslöser verschluckt.
+
+### Geändert
+- **Verständlichere Oberfläche.** Protokoll-Englisch wird übersetzt
+  (`mounted` → „Karte bereit“, `stopped` → „GESTOPPT“), Einzahl und Mehrzahl
+  stimmen („1 Minute frei“), lange Restzeiten stehen zusätzlich in Stunden,
+  und die Ordner am Deck heißen in der Anzeige „Slot 2“ statt „2“.
+- Jeder Abschnitt hat eine Zeile, die erklärt, wofür er da ist. Die Felder
+  heißen nach dem, was sie bewirken („Vorbereiten, wenn nur noch … Minuten
+  frei“ statt „Vorbereiten ab … Minuten Rest“) und haben kurze Hinweise.
+- Selten gebrauchte technische Felder (FTP-Zugang zum Deck, Steuer-Port)
+  liegen jetzt in aufklappbaren Bereichen.
+- **Warnung, wenn es eng wird:** Läuft die Karte voll und steckt im anderen
+  Slot keine, sagt die Oberfläche das deutlich – ebenso, wenn die
+  Endlosautomatik dabei ausgeschaltet ist.
+
+### Behoben
+- **Windows-Verwaltungskram wurde mitgesichert.** `System Volume Information`,
+  `$RECYCLE.BIN`, `.Trashes`, `Thumbs.db` und Konsorten werden jetzt
+  übersprungen.
+
+### Hinweis
+- Der FTP-Server im HyperDeck verträgt **nur eine Verbindung**. Läuft das
+  Programm zweimal oder hängt noch ein FTP-Client am Deck, antwortet es
+  versetzt („226 …“, „200 …“). Dann alle anderen Zugriffe schließen.
+
+---
+
 ## [3.1.1] – 2026-09-12
 
 ### Behoben
@@ -37,8 +76,11 @@ PATCH bei Fehlerbehebungen.
 
 ### Neu
 - **Tacho im Ereignis-Log:** während langer Übertragungen alle 30 Sekunden
-  eine Zeile mit Prozent, übertragener Menge, Geschwindigkeit und Restzeit,
-  dazu je Datei eine Abschlusszeile mit Dauer und Schnitt.
+  eine Zeile mit Prozent, übertragener Menge, Geschwindigkeit und Restzeit –
+  **für die Datei und für den gesamten Lauf** –, dazu je Datei eine
+  Abschlusszeile mit Dauer und Schnitt. Die Restzeit steht auch im
+  Statusblock der Oberfläche und beruht auf einer geglätteten
+  Geschwindigkeit, damit sie nicht springt.
 - **FTP-Dialog im Log:** Geht etwas schief, stehen die letzten Zeilen des
   tatsächlichen FTP-Gesprächs im Log – Fehlersuche ohne Raten.
 - **Abfrageintervall ab 1 Sekunde** einstellbar (vorher 5). Der Kartenstatus

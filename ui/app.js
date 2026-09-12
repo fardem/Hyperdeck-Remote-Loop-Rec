@@ -5,6 +5,36 @@ var logSeq = 0;          // zuletzt empfangene Log-Zeile
 var lastInterval = 60;
 var settingsDirty = false;   // ungespeicherte Aenderung in einem Eingabefeld
 var DAYS = ['Mo','Di','Mi','Do','Fr','Sa','So'];
+
+// Das Deck antwortet in Protokollsprache - hier wird daraus Deutsch.
+var TRANSPORT_TEXT = {
+  record: 'REC', stopped: 'GESTOPPT', play: 'WIEDERGABE', preview: 'VORSCHAU',
+  forward: 'VORLAUF', rewind: 'RÜCKLAUF', jog: 'JOG', shuttle: 'SHUTTLE',
+  offline: 'OFFLINE', unbekannt: 'UNBEKANNT'
+};
+var SLOT_TEXT = {
+  mounted: 'Karte bereit', mounting: 'Karte wird gelesen', empty: 'keine Karte',
+  error: 'Kartenfehler', unknown: 'unbekannt'
+};
+
+function minutesText(n){
+  n = Number(n);
+  if (!isFinite(n)) return '—';
+  return n === 1 ? '1 Minute' : n + ' Minuten';
+}
+
+function hoursHint(mins){
+  mins = Number(mins) || 0;
+  if (mins < 90) return '';
+  var h = Math.floor(mins / 60), m = mins % 60;
+  return 'gut ' + h + ':' + (m < 10 ? '0' : '') + m + ' h';
+}
+
+function slotLabel(folder){
+  // Die Ordner am Deck heissen je nach Modell "2", "sd2" oder "cfast2".
+  var m = String(folder).match(/(\d)$/);
+  return m ? 'Slot ' + m[1] : String(folder);
+}
 var HINT_DEFAULT = {
   saveHint: 'Werden in hyperdeck_config.json gesichert.',
   bkSaveHint: 'Dateien werden nie überschrieben oder am Deck gelöscht.'
@@ -20,10 +50,17 @@ function fmtBytes(n){
 function fmtDur(sec){
   sec = Math.max(0, Math.round(Number(sec) || 0));
   if (sec < 60) return sec + ' s';
-  var m = Math.floor(sec / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
-  if (d >= 1) return d + ' Tag' + (d === 1 ? '' : 'en') + ' ' + (h % 24) + ' h';
-  if (h >= 1) return h + ' h ' + (m % 60) + ' min';
-  return m + ' min';
+  var two = function(n){ return (n < 10 ? '0' : '') + n; };
+  if (sec < 3600) return Math.floor(sec / 60) + ':' + two(sec % 60) + ' min';
+  var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  if (h < 24) return h + ':' + two(m) + ' h';
+  var d = Math.floor(h / 24);
+  return d + ' Tag' + (d === 1 ? '' : 'en') + ' ' + (h % 24) + ' h';
+}
+
+function etaText(done, total, speed){
+  if (!(speed > 0) || !total || total <= done) return '';
+  return 'noch etwa ' + fmtDur((total - done) / speed);
 }
 
 function setHint(id, text, resetAfter){
@@ -289,11 +326,14 @@ function renderSlots(d){
       '<div class="slot-head"><div class="slot-name">Slot ' + s.id +
         (s.volume ? ' · <span style="color:var(--dim2);font-weight:400">' + esc(s.volume) + '</span>' : '') +
       '</div>' +
-      (isActive ? '<span class="tag' + (rec ? ' rec' : '') + '">' + (rec ? 'nimmt auf' : 'aktiv') + '</span>' : '') +
+      (isActive ? '<span class="tag' + (rec ? ' rec' : '') + '">' + (rec ? 'nimmt auf' : 'in Benutzung') + '</span>' : '') +
       '</div>' +
-      '<div class="mins">' + (mounted ? mins : '—') + '<small>Minuten frei</small></div>' +
+      '<div class="mins">' + (mounted ? mins : '—') +
+        '<small>' + (mounted ? (mins === 1 ? 'Minute frei' : 'Minuten frei') : 'keine Angabe') +
+        (mounted && hoursHint(mins) ? ' · ' + hoursHint(mins) : '') + '</small></div>' +
       '<div class="bar"><span class="' + (low ? 'low' : '') + '" style="width:' + (mounted ? pct : 0) + '%"></span></div>' +
-      '<div class="meta"><span>' + esc(s.status || 'unbekannt') + '</span><span>' + stamp + '</span></div>' +
+      '<div class="meta"><span>' + esc(SLOT_TEXT[s.status] || s.status || 'unbekannt') +
+        '</span><span>' + stamp + '</span></div>' +
       '<div class="slot-actions"><button class="b-sm b-ghost" ' + (mounted ? '' : 'disabled ') +
         'onclick="formatSlot(' + s.id + ')">Karte leeren</button>' +
         (backupTarget ? '<button class="b-sm b-ghost" ' + (mounted ? '' : 'disabled ') +
@@ -301,6 +341,25 @@ function renderSlots(d){
       '</div>';
   }
   $('slots').innerHTML = html;
+}
+
+function cardWarning(d){
+  var slots = d.slots || [], active = null, other = null;
+  for (var i = 0; i < slots.length; i++){
+    if (slots[i].id === d.active_slot) active = slots[i]; else other = slots[i];
+  }
+  if (!active || String(d.status).indexOf('record') !== 0) return '';
+  var limit = num(d.min_remaining_threshold) || 5;
+  if (active.remaining_min > limit) return '';
+  var rest = 'Slot ' + active.id + ' hat nur noch ' + minutesText(active.remaining_min) + ' frei';
+  if (!other || other.status !== 'mounted'){
+    return rest + ' und im anderen Slot steckt keine Karte. Bitte eine einlegen.';
+  }
+  if (!d.loop_record || !d.auto_loop){
+    return rest + '. Die Endlosautomatik ist aus – das Deck wechselt auf Slot ' +
+           other.id + ', danach ist Schluss.';
+  }
+  return '';
 }
 
 function renderLog(d){
@@ -332,15 +391,20 @@ function renderBackup(d){
   var b = d.backup || {};
   var running = !!b.running;
   var done = (Number(b.bytes_done) || 0) + (running ? (Number(b.current_done) || 0) : 0);
-  $('bkPhase').textContent = b.phase || 'Bereit';
+  $('bkPhase').textContent = running ? (b.phase || 'Läuft')
+    : (d.backup_enabled ? 'Bereit – sichert automatisch' : 'Bereit – nur auf Knopfdruck');
+  var totalEta = etaText(done, b.bytes_total, b.speed);
   $('bkDetail').textContent = (running && b.files_total)
-    ? (b.files_done + ' von ' + b.files_total + ' Dateien · ' + fmtBytes(done) + ' / ' + fmtBytes(b.bytes_total))
+    ? (b.files_done + ' von ' + b.files_total + ' Dateien · ' + fmtBytes(done) + ' / ' +
+       fmtBytes(b.bytes_total) + (totalEta ? ' · ' + totalEta : ''))
     : '';
   var pct = (running && b.bytes_total) ? Math.min(100, Math.round(done / b.bytes_total * 100)) : 0;
   $('bkBar').style.width = pct + '%';
   $('bkBar').parentNode.hidden = !running;
   $('bkFile').textContent = running && b.current ? b.current : '';
-  $('bkSpeed').textContent = running && b.speed ? fmtBytes(b.speed) + '/s' : '';
+  var fileEta = etaText(b.current_done, b.current_size, b.speed);
+  $('bkSpeed').textContent = running && b.speed
+    ? fmtBytes(b.speed) + '/s' + (fileEta ? ' · Datei ' + fileEta : '') : '';
   $('bkCancel').hidden = !running;
   $('bkStatus').className = 'bk-status' + (running ? ' run' : '') + (b.error ? ' err' : '');
 
@@ -355,9 +419,10 @@ function renderBackup(d){
   $('bkLast').textContent = lines.join('\n');
 
   var tree = (b.tree || []).map(function(t){
-    return t.name + ': ' + t.files + (t.files === 1 ? ' Datei' : ' Dateien') + ', ' + fmtBytes(t.bytes);
+    return slotLabel(t.name) + ' – ' + t.files + (t.files === 1 ? ' Datei' : ' Dateien') +
+           ', ' + fmtBytes(t.bytes);
   });
-  $('bkTree').textContent = tree.length ? 'Am Deck: ' + tree.join(' · ') : '';
+  $('bkTree').textContent = tree.length ? 'Auf dem Deck liegen: ' + tree.join('  ·  ') : '';
   $('bkAutoHint').textContent = 'Kopiert fertige Clips alle ' + (num(d.backup_interval) || 15) +
     ' Minuten vom Deck ins Ziel';
   $('f_backup_ftp_pass').placeholder = d.backup_ftp_pass_set
@@ -401,8 +466,11 @@ async function refresh(){
   var recording = String(d.status).indexOf('record') === 0;
   document.title = (recording ? '● REC · ' : '') + (d.device || 'HyperDeck Control');
   $('tally').className = recording ? 'tally live' : 'tally';
-  $('tallyWord').textContent = recording ? 'REC' : String(d.status || '--').toUpperCase();
-  $('tallySub').textContent = recording ? 'Aufnahme läuft' : 'Transportstatus';
+  var statusKey = String(d.status || '').toLowerCase();
+  $('tallyWord').textContent = recording ? 'REC'
+    : (TRANSPORT_TEXT[statusKey] || String(d.status || '--').toUpperCase());
+  $('tallySub').textContent = recording ? 'Aufnahme läuft'
+    : (d.connected ? 'Deck steht' : 'keine Verbindung');
   $('tc').textContent = d.timecode;
   $('tcLabel').textContent = d.active_slot ? ('Timecode · Slot ' + d.active_slot) : 'Timecode';
 
@@ -415,6 +483,9 @@ async function refresh(){
   }
   busyNow = d.busy || '';
   paintCountdown();
+  $('pollLabel').textContent = d.notify
+    ? 'Das Deck meldet Änderungen sofort · Kontrollabfrage in '
+    : 'Nächste Abfrage in ';
   $('lastPoll').textContent = d.last_poll ? ('zuletzt ' + d.last_poll) : '';
 
   $('foot').textContent = 'HyperDeck Web Control v' + (d.app_version || '?') +
@@ -423,6 +494,10 @@ async function refresh(){
   $('timerState').textContent = d.timer_info || 'Timer aus';
   $('noticeTimer').hidden = !d.timer_active;
   $('timerTxt').textContent = d.timer_info || '';
+
+  var warning = cardWarning(d);
+  $('noticeCard').hidden = !warning;
+  $('cardTxt').textContent = warning;
 
   $('noticeLock').hidden = !d.manual_stop;
   $('noticeBusy').hidden = !d.busy;

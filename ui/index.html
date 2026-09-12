@@ -31,7 +31,7 @@
     </div>
 
     <div class="poll">
-      <span>Nächste Abfrage in <b id="cd" style="color:var(--txt);font-family:var(--mono)">--</b> s</span>
+      <span><span id="pollLabel">Nächste Abfrage in </span><b id="cd" style="color:var(--txt);font-family:var(--mono)">--</b> s</span>
       <div class="track2"><span id="cdBar" style="width:100%"></span></div>
       <span id="lastPoll"></span>
     </div>
@@ -39,6 +39,7 @@
 
   <!-- Hinweisleisten -->
   <div id="noticeTimer" class="notice timer" hidden><span id="timerTxt"></span></div>
+  <div id="noticeCard" class="notice lock" hidden><span id="cardTxt"></span></div>
   <div id="noticeLock" class="notice lock" hidden>
     <span>Manuell gestoppt. Auto-Record bleibt aus, bis du ihn freigibst.</span>
     <button class="b-warn b-sm" onclick="send('resume_auto')">Auto-Record freigeben</button>
@@ -52,6 +53,7 @@
   <!-- Bedienung -->
   <div class="panel">
     <div class="eyebrow">Bedienung</div>
+    <p class="lead">Direkte Steuerung des Decks und die Automatik für den Dauerbetrieb.</p>
     <div class="buttons">
       <button class="b-rec" onclick="send('record')">Aufnahme starten</button>
       <button onclick="send('stop')">Aufnahme stoppen</button>
@@ -86,6 +88,7 @@
   <!-- Timer -->
   <div class="panel">
     <div class="eyebrow">Timer-Aufnahme</div>
+    <p class="lead">Nimmt zu festen Uhrzeiten auf und stoppt wieder – ohne dass jemand da sein muss.</p>
     <div class="switches" style="margin-top:0">
       <label class="sw">
         <div><div class="t">Timer aktiv</div><div class="d">Startet und stoppt zur eingestellten Uhrzeit</div></div>
@@ -113,6 +116,8 @@
   <!-- Sicherung -->
   <div class="panel">
     <div class="eyebrow">Sicherung der Aufnahmen</div>
+    <p class="lead">Kopiert fertige Clips vom Deck auf diesen PC oder ins Netz.
+       Am Deck wird dabei nichts gelöscht und im Ziel nichts überschrieben.</p>
     <div class="switches" style="margin-top:0">
       <label class="sw">
         <div><div class="t">Automatisch sichern</div><div class="d" id="bkAutoHint">Kopiert fertige Clips regelmäßig vom Deck ins Ziel</div></div>
@@ -144,17 +149,20 @@
       <div class="field">
         <label for="f_backup_mode">Ziel</label>
         <select id="f_backup_mode" data-key="backup_mode" onchange="updateBackupMode()">
-          <option value="folder">Ordner (lokal / Netzlaufwerk)</option>
-          <option value="ftp">FTP-Server</option>
+          <option value="folder">Ordner oder Netzlaufwerk</option>
+          <option value="ftp">FTP-Server (NAS)</option>
         </select>
       </div>
       <div class="field">
-        <label for="f_backup_interval">Alle … Minuten prüfen</label>
+        <label for="f_backup_interval">Nachsehen alle … Minuten</label>
         <input id="f_backup_interval" data-key="backup_interval" type="number" min="1" max="1440">
+        <span class="tip">Wie oft geprüft wird, ob neue Clips fertig sind.</span>
       </div>
       <div class="field wide" id="bkFolderWrap">
-        <label for="f_backup_folder">Zielordner - lokal, Netzlaufwerk oder UNC-Pfad</label>
+        <label for="f_backup_folder">Wohin gesichert wird</label>
         <input id="f_backup_folder" data-key="backup_folder" type="text" placeholder="D:\Aufnahmen  ·  Z:\HyperDeck  ·  \\NAS\Aufnahmen\Deck1">
+        <span class="tip">Ordner auf diesem PC, ein Netzlaufwerk oder eine Freigabe
+          (<code>\\Server\Freigabe\Ordner</code>). Wird bei Bedarf angelegt.</span>
       </div>
       <div class="field wide" id="bkFtpWrap" hidden>
         <div class="fields">
@@ -180,23 +188,32 @@
           </div>
         </div>
       </div>
-      <div class="field">
-        <label for="f_backup_source_path">Startordner am Deck</label>
-        <input id="f_backup_source_path" data-key="backup_source_path" type="text" placeholder="/">
-      </div>
-      <div class="field">
-        <label for="f_deck_ftp_port">FTP-Port des Decks</label>
-        <input id="f_deck_ftp_port" data-key="deck_ftp_port" type="number" min="1" max="65535">
-      </div>
-      <div class="field">
-        <label for="f_deck_ftp_user">Deck-FTP Benutzer (leer = anonym)</label>
-        <input id="f_deck_ftp_user" data-key="deck_ftp_user" type="text" autocomplete="off">
-      </div>
-      <div class="field">
-        <label for="f_deck_ftp_pass">Deck-FTP Passwort</label>
-        <input id="f_deck_ftp_pass" data-key="deck_ftp_pass" type="password" autocomplete="new-password" placeholder="Passwort">
-      </div>
     </div>
+
+    <details class="more">
+      <summary>Zugang zum Deck – nur ändern, wenn es nicht von allein klappt</summary>
+      <div class="fields">
+        <div class="field">
+          <label for="f_backup_source_path">Ordner am Deck</label>
+          <input id="f_backup_source_path" data-key="backup_source_path" type="text" placeholder="/">
+          <span class="tip">Normalerweise <code>/</code> – dort liegen die Slot-Ordner.</span>
+        </div>
+        <div class="field">
+          <label for="f_deck_ftp_port">FTP-Port des Decks</label>
+          <input id="f_deck_ftp_port" data-key="deck_ftp_port" type="number" min="1" max="65535">
+          <span class="tip">Standard ist 21.</span>
+        </div>
+        <div class="field">
+          <label for="f_deck_ftp_user">Benutzer</label>
+          <input id="f_deck_ftp_user" data-key="deck_ftp_user" type="text" autocomplete="off">
+          <span class="tip">Leer lassen – das Deck erlaubt anonymen Zugriff.</span>
+        </div>
+        <div class="field">
+          <label for="f_deck_ftp_pass">Passwort</label>
+          <input id="f_deck_ftp_pass" data-key="deck_ftp_pass" type="password" autocomplete="new-password" placeholder="leer = anonym">
+        </div>
+      </div>
+    </details>
     <div class="row">
       <button onclick="saveSettings('bkSaveHint')">Sicherung speichern</button>
       <span class="hint" id="bkSaveHint">Dateien werden nie überschrieben oder am Deck gelöscht.</span>
@@ -206,39 +223,52 @@
   <!-- Einstellungen -->
   <div class="panel">
     <div class="eyebrow">Einstellungen</div>
+    <p class="lead">Verbindung zum Deck und Verhalten der Endlosaufnahme.</p>
     <div class="fields">
       <div class="field">
-        <label for="f_deck_ip">Deck-IP</label>
+        <label for="f_deck_ip">IP-Adresse des Decks</label>
         <input id="f_deck_ip" data-key="deck_ip" type="text" inputmode="decimal">
+        <span class="tip">Steht am Gerät im Menü unter „Netzwerk“.</span>
       </div>
       <div class="field">
-        <label for="f_deck_port">Deck-Port</label>
-        <input id="f_deck_port" data-key="deck_port" type="number" min="1" max="65535">
-      </div>
-      <div class="field">
-        <label for="f_check_interval">Abfrage alle … Sekunden (1–3600)</label>
+        <label for="f_check_interval">Kontrollabfrage alle … Sekunden</label>
         <input id="f_check_interval" data-key="check_interval" type="number" min="1" max="3600">
+        <span class="tip">Änderungen meldet das Deck sofort von selbst. Ein kleiner
+          Wert lässt nur den Timecode flüssiger laufen.</span>
       </div>
       <div class="field">
-        <label for="f_min_remaining_threshold">Vorbereiten ab … Minuten Rest</label>
+        <label for="f_min_remaining_threshold">Vorbereiten, wenn nur noch … Minuten frei</label>
         <input id="f_min_remaining_threshold" data-key="min_remaining_threshold" type="number" min="1" max="240">
+        <span class="tip">So viel Vorlauf bleibt, bevor die laufende Karte voll ist. Dann wird die Nachbarkarte hergerichtet.</span>
       </div>
       <div class="field">
-        <label for="f_inactive_min_free">Karte leeren unter … Minuten frei</label>
+        <label for="f_inactive_min_free">Nachbarkarte leeren, wenn sie unter … Minuten frei hat</label>
         <input id="f_inactive_min_free" data-key="inactive_min_free" type="number" min="1" max="2000">
+        <span class="tip">Hat sie mehr frei, bleibt sie unangetastet.</span>
       </div>
       <div class="field">
-        <label for="f_format_filesystem">Dateisystem</label>
+        <label for="f_format_filesystem">Dateisystem beim Leeren</label>
         <select id="f_format_filesystem" data-key="format_filesystem">
           <option value="exFAT">exFAT</option>
           <option value="HFS+">HFS+</option>
         </select>
       </div>
       <div class="field">
-        <label for="f_format_name">Datenträgername</label>
+        <label for="f_format_name">Name der Karte nach dem Leeren</label>
         <input id="f_format_name" data-key="format_name" type="text">
       </div>
     </div>
+    <details class="more">
+      <summary>Selten gebraucht</summary>
+      <div class="fields">
+        <div class="field">
+          <label for="f_deck_port">Steuer-Port des Decks</label>
+          <input id="f_deck_port" data-key="deck_port" type="number" min="1" max="65535">
+          <span class="tip">Standard ist 9993.</span>
+        </div>
+      </div>
+    </details>
+
     <div class="row">
       <button onclick="saveSettings('saveHint')">Einstellungen speichern</button>
       <span class="hint" id="saveHint">Werden in hyperdeck_config.json gesichert.</span>
@@ -248,6 +278,7 @@
   <!-- Ereignisse -->
   <div class="panel">
     <div class="eyebrow">Ereignisse</div>
+    <p class="lead">Was das Programm getan hat – die letzten 250 Zeilen.</p>
     <div class="log" id="log"></div>
     <div class="hint foot">
       <span id="foot">HyperDeck Web Control v{{APP_VERSION}}</span>

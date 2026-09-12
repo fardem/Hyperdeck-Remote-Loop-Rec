@@ -1,52 +1,171 @@
 # -*- coding: utf-8 -*-
-"""Minimales HyperDeck-Simulat (Ethernet-Protokoll) fuer Tests.
+"""HyperDeck-Simulat (Ethernet-Protokoll, Port 9993) fuer Tests und Handproben.
 
-Start: python tests/fake_deck.py [port]   (Standard 9993)
+Kann das Noetigste: transport info, slot info, record, stop, format-Antworten -
+und vor allem "notify": dann meldet es Aenderungen von sich aus als
+asynchrone 508/502-Bloecke, genau wie ein echtes Geraet.
+
+Start:  python tests/fake_deck.py [port] [--stop-after SEKUNDEN]
+        --stop-after laesst die Aufnahme von selbst enden (Signalverlust proben)
 """
-import socket, threading, sys, time
+import socket
+import sys
+import threading
+import time
 
-state = {"status": "stopped", "log": []}
+CRLF = "\r\n"
 
-def client(conn):
-    conn.sendall(b"500 connection info:\r\nprotocol version: 1.11\r\nmodel: HyperDeck Studio Test\r\n\r\n")
-    buf = b""
-    while True:
+
+class FakeDeck(object):
+    def __init__(self, port=9993, stop_after=0.0, model="HyperDeck Studio Test"):
+        self.port = port
+        self.stop_after = stop_after
+        self.model = model
+        self.status = "stopped"
+        self.slots = {1: {"status": "mounted", "volume": "TestCard", "recording time": 3600},
+                      2: {"status": "mounted", "volume": "TestCard2", "recording time": 3600}}
+        self.active = 1
+        self.log = []
+        self.clients = []
+        self.lock = threading.Lock()
+        self.server = None
+
+    # ---- Antwortbausteine -------------------------------------------------
+
+    def transport_block(self, code=208):
+        return ("%d transport info:%s"
+                "status: %s%sslot id: %d%stimecode: 10:00:00:00%sdisplay timecode: "
+                "10:00:00:00%s%s" % (code, CRLF, self.status, CRLF, self.active, CRLF,
+                                     CRLF, CRLF, CRLF))
+
+    def slot_block(self, slot_id, code=202):
+        slot = self.slots[slot_id]
+        return ("%d slot info:%sslot id: %d%sstatus: %s%svolume name: %s%s"
+                "recording time: %d%s%s" % (code, CRLF, slot_id, CRLF, slot["status"], CRLF,
+                                            slot["volume"], CRLF, slot["recording time"],
+                                            CRLF, CRLF))
+
+    # ---- unaufgeforderte Meldungen ---------------------------------------
+
+    def announce(self, what, slot_id=None):
+        """Schickt allen Клients, die es abonniert haben, eine 5xx-Meldung."""
+        with self.lock:
+            targets = list(self.clients)
+        for conn, wants in targets:
+            if not wants.get(what):
+                continue
+            text = (self.transport_block(508) if what == "transport"
+                    else self.slot_block(slot_id or self.active, 502))
+            try:
+                conn.sendall(text.encode("utf-8"))
+            except OSError:
+                pass
+
+    def set_status(self, status, announce=True):
+        self.status = status
+        if announce:
+            self.announce("transport")
+
+    def set_slot(self, slot_id, **fields):
+        self.slots[slot_id].update(fields)
+        self.announce("slot", slot_id)
+
+    # ---- Verbindungen -----------------------------------------------------
+
+    def serve(self):
+        self.server = socket.socket()
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server.bind(("127.0.0.1", self.port))
+        self.server.listen(5)
+        self.port = self.server.getsockname()[1]
+        threading.Thread(target=self._accept, daemon=True).start()
+        return self.port
+
+    def _accept(self):
+        while True:
+            try:
+                conn, _ = self.server.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._client, args=(conn,), daemon=True).start()
+
+    def close(self):
         try:
-            chunk = conn.recv(4096)
+            self.server.close()
+        except Exception:
+            pass
+
+    def _client(self, conn):
+        wants = {"transport": False, "slot": False}
+        with self.lock:
+            self.clients.append((conn, wants))
+        conn.sendall(("500 connection info:%sprotocol version: 1.11%smodel: %s%s%s"
+                      % (CRLF, CRLF, self.model, CRLF, CRLF)).encode("utf-8"))
+        buf = b""
+        try:
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    cmd = line.decode("utf-8", "replace").strip()
+                    if cmd:
+                        self._command(conn, wants, cmd)
         except OSError:
             return
-        if not chunk:
-            return
-        buf += chunk
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
-            cmd = line.decode("utf-8", "replace").strip()
-            if not cmd:
-                continue
-            state["log"].append(cmd)
-            print("DECK <- %s" % cmd, flush=True)
-            if cmd == "transport info":
-                conn.sendall(("208 transport info:\r\nstatus: %s\r\nslot id: 1\r\n"
-                              "timecode: 10:00:00:00\r\n\r\n" % state["status"]).encode())
-            elif cmd.startswith("slot info"):
-                sid = cmd.strip()[-1]
-                conn.sendall(("202 slot info:\r\nslot id: %s\r\nstatus: mounted\r\n"
-                              "volume name: TestCard\r\nrecording time: 3600\r\n\r\n" % sid).encode())
-            elif cmd == "record":
-                state["status"] = "record"
-                conn.sendall(b"200 ok\r\n")
-            elif cmd == "stop":
-                state["status"] = "stopped"
-                conn.sendall(b"200 ok\r\n")
-            else:
-                conn.sendall(b"200 ok\r\n")
+        finally:
+            with self.lock:
+                self.clients = [(c, w) for c, w in self.clients if c is not conn]
+            try:
+                conn.close()
+            except Exception:
+                pass
 
-srv = socket.socket()
-srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9993
-srv.bind(("127.0.0.1", PORT))
-srv.listen(5)
-print("Fake-Deck laeuft auf 127.0.0.1:%d" % PORT, flush=True)
-while True:
-    conn, _ = srv.accept()
-    threading.Thread(target=client, args=(conn,), daemon=True).start()
+    def _command(self, conn, wants, cmd):
+        self.log.append(cmd)
+        low = cmd.lower()
+        send = lambda text: conn.sendall(text.encode("utf-8"))
+
+        if low == "transport info":
+            send(self.transport_block())
+        elif low.startswith("slot info"):
+            slot_id = 2 if "slot id: 2" in low else 1
+            send(self.slot_block(slot_id))
+        elif low.startswith("notify:"):
+            for key in ("transport", "slot"):
+                if "%s: true" % key in low:
+                    wants[key] = True
+                elif "%s: false" % key in low:
+                    wants[key] = False
+            send("200 ok" + CRLF)
+        elif low == "record":
+            self.set_status("record")          # Meldung kommt VOR der Antwort
+            send("200 ok" + CRLF)
+            if self.stop_after > 0:
+                threading.Timer(self.stop_after, self._spontaneous_stop).start()
+        elif low == "stop":
+            self.set_status("stopped")
+            send("200 ok" + CRLF)
+        else:
+            send("200 ok" + CRLF)
+
+    def _spontaneous_stop(self):
+        """Das Deck hoert von selbst auf - z. B. Signalverlust."""
+        if self.status == "record":
+            self.set_status("stopped")
+
+
+if __name__ == "__main__":
+    args = [a for a in sys.argv[1:]]
+    port = 9993
+    stop_after = 0.0
+    if args and args[0].isdigit():
+        port = int(args.pop(0))
+    if "--stop-after" in args:
+        stop_after = float(args[args.index("--stop-after") + 1])
+    deck = FakeDeck(port, stop_after)
+    print("Fake-Deck laeuft auf 127.0.0.1:%d" % deck.serve(), flush=True)
+    while True:
+        time.sleep(3600)

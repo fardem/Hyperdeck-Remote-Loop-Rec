@@ -5,7 +5,7 @@ Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Autom
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue?logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/WebUI-Flask-black?logo=flask&logoColor=white)
 ![Hardware](https://img.shields.io/badge/Hardware-BM%20HyperDeck-red)
-![Version](https://img.shields.io/badge/Version-3.1.1-blueviolet)
+![Version](https://img.shields.io/badge/Version-3.2.0-blueviolet)
 ![Tests](https://github.com/fardem/Hyperdeck-Remote-Loop-Rec/actions/workflows/tests.yml/badge.svg)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -54,6 +54,7 @@ Standardmäßig stoppt ein Blackmagic HyperDeck die Aufnahme, sobald beide einge
 * 🌐 **Responsives Dark-Mode Webinterface:** Timecode, Tally, Füllstandsbalken, Live-Countdown und Systemlog synchronisieren sich verzögerungsfrei und flüssig im Browser.
 * 💾 **Live-Konfiguration:** Alle Parameter sind im laufenden Betrieb in der Web-UI änderbar und werden persistent in `hyperdeck_config.json` gespeichert.
 * 🚀 **Startet und öffnet sich selbst:** `start.bat` (Windows) bzw. `start.sh` prüft Python, installiert die Abhängigkeiten und startet den Dienst – der Browser geht automatisch mit der richtigen Adresse auf. Das Konsolenfenster bleibt in jedem Fall offen.
+* ⚡ **Reagiert sofort:** Das Deck meldet Änderungen von sich aus (`notify`), statt abgefragt zu werden. Endet eine Aufnahme, greift die Automatik in unter einer Sekunde – nicht erst bei der nächsten Abfrage.
 * 🏷️ **Sichtbare Version:** Die laufende Programmversion steht in der Kopf- und Fußzeile der Oberfläche sowie in der Startmeldung der Konsole.
 * 🧱 **Für den Dauerbetrieb gebaut:** Produktions-Webserver (waitress), rotierende Logdatei `hyperdeck.log`, atomar geschriebene Konfiguration, automatisierte Tests bei jedem Push.
 
@@ -93,6 +94,7 @@ Klassische Skripte frieren häufig ein, wenn Web-Anfragen und Überwachungsschle
 └─────────────────────────────────────────────────────────────┘
 
 - **Kein Socket-Konflikt:** Flask redet niemals direkt mit dem Deck, sondern legt Aufträge in eine Queue.
+- **Das Deck meldet sich selbst:** Nach dem Verbinden werden `notify: transport: true` und `notify: slot: true` abonniert. Statusänderungen kommen dann als asynchrone `508`/`502`-Meldungen **sofort** – ohne auf die nächste Abfrage zu warten. Die regelmäßige Abfrage bleibt als Sicherheitsnetz.
 - **Sicherung getrennt:** Die FTP-Spiegelung läuft in einem eigenen Thread mit eigener Verbindung (Port 21). Sie kann die Steuerverbindung weder blockieren noch stören.
 - **Echter Stream-Parser:** Antworten werden nach 3-stelligen Statuscodes (200 ok, 216 format ready) geparst. Unaufgeforderte asynchrone Statusmeldungen (5xx) werden sauber herausgefiltert.
 - **Lokale Timer-Interpolation:** Der Countdown zur nächsten Abfrage zählt im Browser per JavaScript (`Date.now()`) flüssig herunter, ohne das Netzwerk zu belasten.
@@ -223,7 +225,7 @@ Die Weboberfläche ist in funktionale Bereiche gegliedert:
 | --- | --- | --- |
 | **Deck-IP** | `172.17.100.119` | IP-Adresse des Ziel-HyperDecks im Netzwerk. |
 | **Deck-Port** | `9993` | Steuer-Port des HyperDecks (Standard: 9993). |
-| **Abfrage alle … Sekunden** | `20` | Zeitspanne zwischen zwei Statusabfragen (**1–3600 Sek.**). Netzwerklast ist auch im Sekundentakt zu vernachlässigen (ein paar hundert Byte über die stehende TCP-Verbindung); der Kartenstatus wird dabei automatisch auf höchstens alle 5 Sekunden ausgedünnt und Auto-Record versucht einen Neustart höchstens alle 10 Sekunden. |
+| **Kontrollabfrage alle … Sekunden** | `20` | Sicherheitsnetz neben den Meldungen des Decks (**1–3600 Sek.**). Zustandsänderungen kommen ohnehin sofort; ein kleiner Wert lässt nur den **Timecode** flüssiger laufen. Der Kartenstatus wird dabei auf höchstens alle 5 Sekunden ausgedünnt, Auto-Record versucht einen Neustart höchstens alle 10 Sekunden. |
 | **Vorbereiten ab … Minuten Rest** | `5` | Schwellenwert der aktiven Karte, ab dem die Nachbarkarte vorbereitet wird. |
 | **Karte leeren unter … Minuten frei** | `15` | Ist auf der inaktiven Karte mehr Restzeit frei, wird sie nicht formatiert. |
 | **Dateisystem** | `exFAT` | Formatierungsauswahl (exFAT oder HFS+). |
@@ -313,6 +315,9 @@ FTP-Dialog im Ereignis-Log.
 2. Nur **fertige** Clips werden kopiert: Eine Datei gilt als fertig, wenn ihre
    Größe 20 Sekunden lang unverändert bleibt. Während das Deck aufnimmt, wird
    zusätzlich die jüngste Datei des aktiven Slots ausgelassen.
+   **Verwaltungskram der Dateisysteme** (`System Volume Information`,
+   `$RECYCLE.BIN`, `.Trashes`, `Thumbs.db`, versteckte Dateien …) wird
+   übersprungen – Windows legt so etwas auf jeder Karte an.
 3. Jeder Clip bekommt den Aufnahmezeitpunkt vorangestellt:
    `sd1/2026-09-12_09-00-13_HyperDeck_0001.mov`. Der HyperDeck zählt nach
    jedem Formatieren wieder bei `0001` – ohne Zeitstempel würden sich Clips
@@ -340,9 +345,22 @@ Der Fortschritt steht **auch im Ereignis-Log**: während langer Übertragungen
 alle 30 Sekunden eine Tachozeile, dazu je Datei eine Abschlusszeile.
 
 ```text
-Sicherung: sd1/HyperDeck_0003.mov 42 % (12,6 GB von 30,0 GB) - 28,4 MB/s - noch etwa 10:14 min
-Sicherung: sd1/HyperDeck_0003.mov fertig - 30,0 GB in 18:02 min (28,4 MB/s)
+Sicherung 3/5: sd1/HyperDeck_0003.mov 42 % (12,6 GB von 30,0 GB) - 28,4 MB/s - noch etwa 10:14 min | gesamt 41,2 GB von 96,0 GB, noch etwa 32:06 min
+Sicherung 3/5: sd1/HyperDeck_0003.mov fertig - 30,0 GB in 18:02 min (28,4 MB/s) | gesamt 58,6 GB von 96,0 GB, noch etwa 21:52 min
 ```
+
+Die Restzeit gibt es zweimal: für die **laufende Datei** und für den **gesamten
+Lauf**. Beides steht auch im Statusblock der Oberfläche. Grundlage ist eine
+geglättete Geschwindigkeit, damit die Schätzung nicht bei jeder Schwankung
+springt.
+
+> 💡 **Wie lange dauert eine volle Karte?** Bei rund 9 MB/s (gemessen über
+> WLAN an einem HyperDeck Studio Mini) braucht eine 64-GB-Karte gut **zwei
+> Stunden**. Über Kabel und Gigabit ist deutlich mehr drin – das Tempo steht
+> live im Log und in der Oberfläche. Deshalb lieber laufend im Intervall sichern als einmal am Ende.
+> Wichtig für den Dauerbetrieb: Die Sicherung muss schneller sein als die
+> Aufnahme. 9 MB/s entsprechen 32 GB/h – das reicht für H.264/H.265 locker,
+> für ProRes HQ (~97 GB/h) nicht.
 
 ### Hinweise für den Betrieb
 
@@ -536,6 +554,8 @@ Die GitHub Action `.github/workflows/tests.yml` führt alles bei jedem Push aus.
 | Sicherung: „Deck-FTP FEHLER“ | FTP am Deck nicht erreichbar (Port 21 gesperrt, Deck aus, falsche IP). | Im Browser `ftp://<DECK-IP>` öffnen bzw. mit FileZilla testen. Firewall am PC prüfen. |
 | „226 Closing data connection“ als Fehler | Fehler in Version 3.1.0: `MLSD`/`LIST` brachten den Steuerkanal des Decks durcheinander. | Mit 3.1.1 behoben – es wird nur noch `NLST` benutzt. |
 | Aufnahme startet nicht mit der PC-Uhrzeit | Der Timecode-Eingang des Decks stand nicht auf `preset`. | Mit 3.1.1 behoben: „Timecode auf Uhrzeit“ setzt den Eingang jetzt mit. Am Deck prüfen: Timecode-Quelle = Preset. |
+| Sicherung meldet versetzte Antworten (`200`/`226`) | Es läuft noch ein zweiter Zugriff auf den FTP-Server des Decks (zweite Programminstanz, offener FileZilla). Das Gerät verträgt nur einen. | Andere Verbindungen schließen, notfalls alle Fenster des Programms beenden und neu starten. |
+| `System Volume Information` im Sicherungsziel | Vor 3.2.0 wurde alles kopiert, was auf der Karte lag. | Mit 3.2.0 werden Systemdateien übersprungen. Die bereits kopierten Reste können gelöscht werden. |
 | Deck-Uhr geht falsch | Datum und Uhrzeit des Decks lassen sich über das Ethernet-Protokoll **nicht** setzen – der Befehlssatz kennt dafür nichts. | Am Gerät selbst stellen (Setup-Menü) bzw. über das Blackmagic-Setup-Utility. Betrifft die Zeitstempel in den Zieldateinamen. |
 | Sicherung: „Ziel FEHLER“ | Ordner nicht beschreibbar, Laufwerksbuchstabe für dieses Konto nicht vorhanden, FTP-Login falsch. | UNC-Pfad statt Laufwerksbuchstabe; Rechte des Kontos prüfen; „Verbindung testen“ nutzen. |
 | Karte wird nicht geleert, Log meldet „wartet auf Sicherung“ | „Karte erst leeren, wenn gesichert“ ist an und die Sicherung kommt nicht durch. | Ziel reparieren – oder den Schalter ausschalten, wenn die Schleife wichtiger ist als die Daten. |
@@ -548,7 +568,7 @@ Die GitHub Action `.github/workflows/tests.yml` führt alles bei jedem Push aus.
 Das Projekt folgt der [Semantischen Versionierung](https://semver.org/lang/de/)
 (**MAJOR.MINOR.PATCH**). Die laufende Version steht
 
-- oben rechts in der Kopfzeile der Weboberfläche (z. B. `v3.1.1`),
+- oben rechts in der Kopfzeile der Weboberfläche (z. B. `v3.2.0`),
 - in der Fußzeile unter dem Ereignis-Log,
 - in der Startmeldung des Konsolenfensters,
 - in `hyperdeck_control.py` in der Konstanten `APP_VERSION`,
@@ -560,8 +580,8 @@ Bei einer neuen Version zusätzlich auf GitHub einen Tag und ein Release anlegen
 dann ist die Version auch dort sichtbar und herunterladbar:
 
 ```bash
-git tag -a v3.1.1 -m "Sicherung gegen den echten HyperDeck-FTP-Server"
-git push origin v3.1.1
+git tag -a v3.2.0 -m "Deck meldet Aenderungen selbst, verstaendlichere Oberflaeche"
+git push origin v3.2.0
 ```
 
 ---

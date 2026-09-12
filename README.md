@@ -5,7 +5,7 @@ Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Autom
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue?logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/WebUI-Flask-black?logo=flask&logoColor=white)
 ![Hardware](https://img.shields.io/badge/Hardware-BM%20HyperDeck-red)
-![Version](https://img.shields.io/badge/Version-3.1.0-blueviolet)
+![Version](https://img.shields.io/badge/Version-3.1.1-blueviolet)
 ![Tests](https://github.com/fardem/Hyperdeck-Remote-Loop-Rec/actions/workflows/tests.yml/badge.svg)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -212,7 +212,7 @@ Die Weboberfläche ist in funktionale Bereiche gegliedert:
 | **Loop-Record** | **Hauptschalter.** Aus = keinerlei Automatik; Auto-Record und Auto-Loop werden gesperrt und ausgegraut. |
 | **Auto-Record** | Startet die Aufnahme automatisch, sobald das Deck steht. |
 | **Auto-Loop** | Formatiert die inaktive Karte rechtzeitig vor Kartenüberlauf. |
-| **Timecode auf Uhrzeit** | Synchronisiert den Startzeitcode mit der PC-Systemzeit (`HH:MM:SS:00`). |
+| **Timecode auf Uhrzeit** | Setzt den Startzeitcode auf die PC-Systemzeit (`HH:MM:SS:00`). Schaltet dazu den **Timecode-Eingang des Decks auf `preset`** – ohne das ignoriert das Deck die Vorgabe und zählt den Timecode aus dem Videosignal weiter. Wer extern (LTC) oder eingebettet einspeist, lässt den Schalter aus. |
 | **Timer aktiv** | Schaltet die Zeitsteuerung scharf (siehe nächster Abschnitt). |
 | **Automatisch sichern** | Spiegelt fertige Clips im eingestellten Intervall ins Sicherungsziel. |
 | **Karte erst leeren, wenn gesichert** | Auto-Loop wartet mit dem Formatieren, bis die Clips der Karte gesichert sind. |
@@ -223,7 +223,7 @@ Die Weboberfläche ist in funktionale Bereiche gegliedert:
 | --- | --- | --- |
 | **Deck-IP** | `172.17.100.119` | IP-Adresse des Ziel-HyperDecks im Netzwerk. |
 | **Deck-Port** | `9993` | Steuer-Port des HyperDecks (Standard: 9993). |
-| **Abfrage alle … Sekunden** | `20` | Zeitspanne zwischen zwei Statusabfragen (5–3600 Sek.). |
+| **Abfrage alle … Sekunden** | `20` | Zeitspanne zwischen zwei Statusabfragen (**1–3600 Sek.**). Netzwerklast ist auch im Sekundentakt zu vernachlässigen (ein paar hundert Byte über die stehende TCP-Verbindung); der Kartenstatus wird dabei automatisch auf höchstens alle 5 Sekunden ausgedünnt und Auto-Record versucht einen Neustart höchstens alle 10 Sekunden. |
 | **Vorbereiten ab … Minuten Rest** | `5` | Schwellenwert der aktiven Karte, ab dem die Nachbarkarte vorbereitet wird. |
 | **Karte leeren unter … Minuten frei** | `15` | Ist auf der inaktiven Karte mehr Restzeit frei, wird sie nicht formatiert. |
 | **Dateisystem** | `exFAT` | Formatierungsauswahl (exFAT oder HFS+). |
@@ -288,6 +288,24 @@ dort in ein Ziel deiner Wahl:
 | **Ordner** (lokal oder Netzlaufwerk) | Zielordner | `D:\Aufnahmen`, `Z:\HyperDeck` oder `\\NAS\Aufnahmen\Deck1` (UNC) |
 | **FTP-Server** | Server, Port, Benutzer, Passwort, Ordner | NAS mit FTP-Dienst, `/Aufnahmen/Deck1` |
 
+### Der FTP-Server im HyperDeck ist eigen
+
+Er beherrscht nur einen sehr kleinen Befehlssatz. Deshalb benutzt dieses
+Programm ausschließlich:
+
+```text
+CWD <ordner>  →  NLST  →  SIZE <name>  →  MDTM <name>  →  RETR <name>
+```
+
+Erst in den Ordner wechseln, danach **nur blanke Dateinamen** – absolute Pfade
+als Argument lehnt das Gerät ab. `MLSD` und `LIST` kennt es nicht und lässt nach
+einem abgelehnten Datenbefehl eine unbeantwortete `226 Closing data connection`
+im Steuerkanal liegen; der nächste Befehl liest sie als seine eigene Antwort,
+und ab da ist der Dialog verschoben (genau daran scheiterte Version 3.1.0).
+Bei jedem Verdacht auf einen verschobenen Dialog wird die Verbindung deshalb
+weggeworfen und neu aufgebaut. Geht doch etwas schief, steht der komplette
+FTP-Dialog im Ereignis-Log.
+
 ### So läuft ein Sicherungslauf ab
 
 1. Die Dateiliste des Decks wird gelesen (`sd1`, `sd2`, … – die Ordnernamen
@@ -317,6 +335,14 @@ dort in ein Ziel deiner Wahl:
 | **Verbindung testen** | Prüft Deck-FTP (Anzahl Dateien, Größe, Ordner) und ob das Ziel beschreibbar ist. |
 | **Abbrechen** | Bricht den laufenden Lauf ab; die aktuelle `.part`-Datei wird entfernt. |
 | Statusblock | Phase, Datei, Fortschritt, Geschwindigkeit, letztes Ergebnis, nächster Lauf, Inhalt des Decks. |
+
+Der Fortschritt steht **auch im Ereignis-Log**: während langer Übertragungen
+alle 30 Sekunden eine Tachozeile, dazu je Datei eine Abschlusszeile.
+
+```text
+Sicherung: sd1/HyperDeck_0003.mov 42 % (12,6 GB von 30,0 GB) - 28,4 MB/s - noch etwa 10:14 min
+Sicherung: sd1/HyperDeck_0003.mov fertig - 30,0 GB in 18:02 min (28,4 MB/s)
+```
 
 ### Hinweise für den Betrieb
 
@@ -488,7 +514,8 @@ pytest -q tests/
 | `tests/test_timer.py` | Zeitplan-Logik und Zustandsautomat (Fenster, Mitternacht, Verriegelung, Nachholen) |
 | `tests/test_backup.py` | FTP-Sicherung gegen zwei lokale FTP-Server (Wachsen, Kollisionen, FTP-Ziel, Abbruch, Fehler) |
 | `tests/test_api.py` | Dienst + simuliertes Deck, komplett über die API |
-| `tests/fake_deck.py` | HyperDeck-Simulator – auch zum Ausprobieren der Oberfläche ohne Gerät |
+| `tests/fake_deck.py` | HyperDeck-Simulator (Steuerprotokoll) – auch zum Ausprobieren der Oberfläche ohne Gerät |
+| `tests/fake_deck_ftp.py` | FTP-Simulator mit den Eigenheiten des Decks (kein MLSD, keine absoluten Pfade, verwaiste `226`) |
 
 Die GitHub Action `.github/workflows/tests.yml` führt alles bei jedem Push aus.
 
@@ -507,6 +534,9 @@ Die GitHub Action `.github/workflows/tests.yml` führt alles bei jedem Push aus.
 | Fenster schließt sich sofort | Python fehlt oder ist nicht im PATH. | `start.bat` benutzen – es zeigt die Ursache an und bleibt offen. |
 | Uhrzeitfelder zeigen AM/PM | Anzeigeformat des Browsers/Systems. | Nur die Anzeige, gespeichert wird immer 24-Stunden-Zeit. Systemsprache auf Deutsch stellen. |
 | Sicherung: „Deck-FTP FEHLER“ | FTP am Deck nicht erreichbar (Port 21 gesperrt, Deck aus, falsche IP). | Im Browser `ftp://<DECK-IP>` öffnen bzw. mit FileZilla testen. Firewall am PC prüfen. |
+| „226 Closing data connection“ als Fehler | Fehler in Version 3.1.0: `MLSD`/`LIST` brachten den Steuerkanal des Decks durcheinander. | Mit 3.1.1 behoben – es wird nur noch `NLST` benutzt. |
+| Aufnahme startet nicht mit der PC-Uhrzeit | Der Timecode-Eingang des Decks stand nicht auf `preset`. | Mit 3.1.1 behoben: „Timecode auf Uhrzeit“ setzt den Eingang jetzt mit. Am Deck prüfen: Timecode-Quelle = Preset. |
+| Deck-Uhr geht falsch | Datum und Uhrzeit des Decks lassen sich über das Ethernet-Protokoll **nicht** setzen – der Befehlssatz kennt dafür nichts. | Am Gerät selbst stellen (Setup-Menü) bzw. über das Blackmagic-Setup-Utility. Betrifft die Zeitstempel in den Zieldateinamen. |
 | Sicherung: „Ziel FEHLER“ | Ordner nicht beschreibbar, Laufwerksbuchstabe für dieses Konto nicht vorhanden, FTP-Login falsch. | UNC-Pfad statt Laufwerksbuchstabe; Rechte des Kontos prüfen; „Verbindung testen“ nutzen. |
 | Karte wird nicht geleert, Log meldet „wartet auf Sicherung“ | „Karte erst leeren, wenn gesichert“ ist an und die Sicherung kommt nicht durch. | Ziel reparieren – oder den Schalter ausschalten, wenn die Schleife wichtiger ist als die Daten. |
 | Clip fehlt im Ziel | Datei wuchs noch (läuft), oder sie ist die jüngste des aufnehmenden Slots. | Kommt beim nächsten Lauf, sobald der Clip abgeschlossen ist. |
@@ -518,7 +548,7 @@ Die GitHub Action `.github/workflows/tests.yml` führt alles bei jedem Push aus.
 Das Projekt folgt der [Semantischen Versionierung](https://semver.org/lang/de/)
 (**MAJOR.MINOR.PATCH**). Die laufende Version steht
 
-- oben rechts in der Kopfzeile der Weboberfläche (z. B. `v3.1.0`),
+- oben rechts in der Kopfzeile der Weboberfläche (z. B. `v3.1.1`),
 - in der Fußzeile unter dem Ereignis-Log,
 - in der Startmeldung des Konsolenfensters,
 - in `hyperdeck_control.py` in der Konstanten `APP_VERSION`,
@@ -530,8 +560,8 @@ Bei einer neuen Version zusätzlich auf GitHub einen Tag und ein Release anlegen
 dann ist die Version auch dort sichtbar und herunterladbar:
 
 ```bash
-git tag -a v3.1.0 -m "Sicherung per FTP, Produktionsserver, Tests"
-git push origin v3.1.0
+git tag -a v3.1.1 -m "Sicherung gegen den echten HyperDeck-FTP-Server"
+git push origin v3.1.1
 ```
 
 ---

@@ -62,7 +62,7 @@ except ImportError:
 # Konfiguration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "3.1.0"       # wird in der Web-Oberflaeche und im Log angezeigt
+APP_VERSION = "3.1.1"       # wird in der Web-Oberflaeche und im Log angezeigt
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # Ablage fuer Konfiguration und Logdatei. Ueber die Umgebungsvariable
 # HYPERDECK_HOME laesst sich ein anderer Ordner waehlen - z. B. fuer eine
@@ -153,7 +153,7 @@ SETTING_TYPES = {
 
 LIMITS = {
     "deck_port": (1, 65535),
-    "check_interval": (5, 3600),
+    "check_interval": (1, 3600),
     "min_remaining_threshold": (1, 240),
     "inactive_min_free": (1, 2000),
     "timer_count": (1, TIMER_SLOTS),
@@ -163,6 +163,8 @@ LIMITS = {
 }
 
 FORMAT_COOLDOWN_S = 180     # Sperre pro Slot nach einer Formatierung
+SLOT_POLL_MIN_S = 5         # Kartenstatus hoechstens so oft abfragen
+AUTORECORD_RETRY_S = 10     # Mindestabstand zwischen zwei Auto-Record-Versuchen
 TIMER_RETRY_S = 10          # Wiederholabstand, wenn ein Timer-Befehl nicht griff
 TIMER_STOP_GRACE_S = 300    # so lange wird ein verpasster Timer-Stopp nachgeholt
 BACKUP_CLEAN_MAX_AGE_S = 900  # so alt darf die letzte saubere Sicherung vor dem Leeren sein
@@ -549,6 +551,8 @@ jobs = queue.Queue()
 shutdown = threading.Event()
 _format_cooldown = {1: 0.0, 2: 0.0}
 _last_autorecord_error = {"text": ""}
+_autorecord_next_try = [0.0]
+_last_slot_poll = [0.0]
 _format_name_supported = {"value": True}
 
 
@@ -579,15 +583,34 @@ def request_poll():
         jobs.put({"action": "poll"})
 
 
+def apply_timecode_preset():
+    """Setzt den Startzeitcode auf die PC-Uhrzeit.
+
+    Wichtig: Das Deck benutzt den Preset nur, wenn sein Timecode-Eingang auch
+    auf "preset" steht (Protokoll: configuration: timecode input:
+    {external/embedded/internal/preset/clip}). Ohne diesen Schritt bleibt die
+    Vorgabe wirkungslos und die Aufnahme laeuft mit dem Timecode aus dem
+    Videosignal weiter."""
+    reply = deck.command("configuration: timecode input: preset")
+    if not reply.ok:
+        log("Deck nimmt 'timecode input: preset' nicht an (%s%s) - der Startzeitcode "
+            "bleibt vermutlich wirkungslos." % (reply, reply.hint()), "warn")
+
+    stamp = datetime.datetime.now().strftime("%H:%M:%S:00")
+    reply = deck.command("configuration: timecode preset: %s" % stamp)
+    if not reply.ok:
+        log("Timecode-Vorgabe abgelehnt (%s%s) - TC-Sync wird abgeschaltet."
+            % (reply, reply.hint()), "warn")
+        update_settings({"sync_timecode": False})
+        return False
+    log("Startzeitcode auf %s gesetzt." % stamp)
+    return True
+
+
 def do_record(manual=False):
     cfg = get_settings()
     if cfg["sync_timecode"]:
-        stamp = datetime.datetime.now().strftime("%H:%M:%S:00")
-        reply = deck.command("configuration: timecode preset: %s" % stamp)
-        if not reply.ok:
-            log("Timecode-Vorgabe abgelehnt (%s%s) - TC-Sync wird abgeschaltet."
-                % (reply, reply.hint()), "warn")
-            update_settings({"sync_timecode": False})
+        apply_timecode_preset()
 
     reply = deck.command("record", timeout=10.0)
     if reply.ok:
@@ -723,8 +746,17 @@ def poll_deck():
         return
     status, active = result
 
-    slots = [read_slot(1), read_slot(2)]
-    set_state(slots=slots, last_poll=datetime.datetime.now().strftime("%H:%M:%S"))
+    # Transportstatus und Timecode sind billig und duerfen im Sekundentakt
+    # kommen. Die Kartenabfrage ist teurer und aendert sich ohnehin langsam.
+    now = time.monotonic()
+    if now - _last_slot_poll[0] >= SLOT_POLL_MIN_S:
+        _last_slot_poll[0] = now
+        slots = [read_slot(1), read_slot(2)]
+        set_state(slots=slots)
+    else:
+        with _state_lock:
+            slots = copy.deepcopy(STATE["slots"])
+    set_state(last_poll=datetime.datetime.now().strftime("%H:%M:%S"))
 
     run_automation(status, active, slots)
 
@@ -741,6 +773,11 @@ def run_automation(status, active, slots):
         if cfg["timer_enabled"]:
             return
         if loop_on and cfg["auto_record"] and not manual_stop:
+            # Bei kurzem Abfrageintervall sonst jede Sekunde ein Startversuch.
+            now = time.monotonic()
+            if now < _autorecord_next_try[0]:
+                return
+            _autorecord_next_try[0] = now + AUTORECORD_RETRY_S
             log("Deck steht (Status: %s) - starte Aufnahme neu." % status, "warn")
             do_record(manual=False)
         return

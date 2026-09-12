@@ -13,6 +13,8 @@ drosselt selbst). Dieses Modul spiegelt die fertigen Clips in ein Ziel:
 Grundsaetze
   * Eigener Thread, eigene Verbindung. Die Steuerverbindung (Port 9993) wird
     nie beruehrt, die Weboberflaeche blockiert nie.
+  * Nur der kleinste FTP-Befehlssatz: CWD, NLST, SIZE, MDTM, RETR - mehr
+    beherrscht der Server im HyperDeck nicht zuverlaessig (siehe unten).
   * Nur "fertige" Dateien: eine Datei wird erst kopiert, wenn ihre Groesse
     ueber einen Zeitraum unveraendert bleibt (laufende Aufnahmen wachsen).
   * Nie loeschen. Am Deck wird nichts entfernt; das Leeren der Karten bleibt
@@ -25,8 +27,10 @@ Grundsaetze
     Abbruch hinterlaesst keine halb fertigen Clips unter echtem Namen.
 """
 
+import collections
 import datetime
 import ftplib
+import io
 import os
 import re
 import socket
@@ -36,6 +40,8 @@ import time
 CHUNK = 256 * 1024          # Blockgroesse beim Kopieren
 STABLE_S = 20               # so lange muss eine Datei unveraendert bleiben
 FTP_TIMEOUT = 30            # Sekunden fuer Verbindungsaufbau und Befehle
+TRACE_MAX = 80              # so viele Zeilen FTP-Dialog werden mitgeschnitten
+LOG_PROGRESS_S = 30         # Abstand der Tacho-Zeilen im Log
 PROBE_NAME = "_hyperdeck_schreibtest.tmp"
 PART_SUFFIX = ".part"
 SLOT_FOLDER_RE = re.compile(r"(\d)$")
@@ -82,6 +88,31 @@ def n_files(count):
     return "1 Datei" if count == 1 else "%d Dateien" % count
 
 
+def duration_text(seconds):
+    if seconds < 1:
+        return "unter 1 s"
+    seconds = int(seconds)
+    if seconds < 60:
+        return "%d s" % seconds
+    if seconds < 3600:
+        return "%d:%02d min" % (seconds // 60, seconds % 60)
+    return "%d:%02d h" % (seconds // 3600, (seconds % 3600) // 60)
+
+
+def progress_text(done, total, speed):
+    """Tachozeile: 42 % (128,0 MB von 305,0 MB) - 24,6 MB/s - noch etwa 7 s"""
+    parts = []
+    if total:
+        parts.append("%d %% (%s von %s)" % (done * 100 // total, human_size(done), human_size(total)))
+    else:
+        parts.append(human_size(done))
+    if speed > 0:
+        parts.append("%s/s" % human_size(speed))
+        if total and total > done:
+            parts.append("noch etwa %s" % duration_text((total - done) / speed))
+    return " - ".join(parts)
+
+
 def join_ftp(*parts):
     """Setzt FTP-Pfade mit "/" zusammen und vermeidet doppelte Schraegstriche."""
     out = "/".join(p.strip("/") for p in parts if p and p.strip("/"))
@@ -101,103 +132,103 @@ def sized_name(name, size):
 
 
 # --------------------------------------------------------------------------
-# Verzeichnislisten des Decks lesen (MLSD -> LIST -> NLST)
+# FTP-Zugriff auf das Deck
 # --------------------------------------------------------------------------
-
-_MONTHS = {m: i for i, m in enumerate(
-    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
-_UNIX_LINE = re.compile(
-    r"^([\-dl])[rwxsStT\-]{9}\s+\d+\s+\S+\s+\S+\s+(\d+)\s+"
-    r"([A-Za-z]{3})\s+(\d{1,2})\s+(\d{4}|\d{1,2}:\d{2})\s+(.+)$")
-_DOS_LINE = re.compile(
-    r"^(\d{2})-(\d{2})-(\d{2,4})\s+(\d{2}):(\d{2})(AM|PM)?\s+(<DIR>|\d+)\s+(.+)$")
-
-
-def parse_list_line(line, now=None):
-    """Liefert (name, is_dir, size, mtime) oder None fuer unverstaendliche Zeilen."""
-    now = now or datetime.datetime.now()
-    line = line.rstrip("\r\n")
-    match = _UNIX_LINE.match(line)
-    if match:
-        kind, size, mon, day, year_or_time, name = match.groups()
-        if kind == "l" and " -> " in name:
-            name = name.split(" -> ", 1)[0]
-        month = _MONTHS.get(mon.lower())
-        mtime = None
-        if month:
-            try:
-                if ":" in year_or_time:
-                    hour, minute = year_or_time.split(":")
-                    mtime = datetime.datetime(now.year, month, int(day), int(hour), int(minute))
-                    if mtime > now + datetime.timedelta(days=1):   # Jahreswechsel
-                        mtime = mtime.replace(year=now.year - 1)
-                else:
-                    mtime = datetime.datetime(int(year_or_time), month, int(day))
-            except ValueError:
-                mtime = None
-        return name, kind == "d", int(size), mtime
-    match = _DOS_LINE.match(line)
-    if match:
-        mon, day, year, hour, minute, ampm, size, name = match.groups()
-        year = int(year)
-        if year < 100:
-            year += 2000
-        hour = int(hour)
-        if ampm == "PM" and hour < 12:
-            hour += 12
-        if ampm == "AM" and hour == 12:
-            hour = 0
-        try:
-            mtime = datetime.datetime(year, int(mon), int(day), hour, int(minute))
-        except ValueError:
-            mtime = None
-        is_dir = size == "<DIR>"
-        return name, is_dir, 0 if is_dir else int(size), mtime
-    return None
+#
+# Der FTP-Server im HyperDeck ist bewusst winzig. Er kennt weder MLSD noch
+# zuverlaessig LIST, und er mag keine absoluten Pfade als Befehlsargument.
+# Scheitert ein Datenbefehl, bleibt bei ihm ausserdem eine unbeantwortete
+# "226 Closing data connection" im Steuerkanal liegen - der naechste Befehl
+# liest sie als seine eigene Antwort, ab da ist der Dialog um eine Zeile
+# verschoben und irgendwann meldet ftplib genau diese 226 als Fehler.
+#
+# Deshalb hier nur der kleinste gemeinsame Nenner, so wie ihn auch einfache
+# FTP-Programme benutzen:
+#     CWD <ordner>  ->  NLST  ->  SIZE <name>  ->  MDTM <name>  ->  RETR <name>
+# Immer erst in den Ordner wechseln, danach nur noch blanke Dateinamen.
+# Und bei jedem Verdacht auf einen verschobenen Dialog: Verbindung wegwerfen
+# und neu aufbauen. Das kostet Millisekunden und rettet den Lauf.
 
 
-def parse_mlsd_time(value):
+class NotADirectory(BackupError):
+    """Der Name ist kein Ordner (CWD abgelehnt)."""
+
+
+def parse_mdtm(value):
+    """"20260912090013" -> datetime. Die Uhrzeit kommt vom Deck."""
     try:
-        return datetime.datetime.strptime(value[:14], "%Y%m%d%H%M%S")
+        return datetime.datetime.strptime(str(value).strip()[:14], "%Y%m%d%H%M%S")
     except (TypeError, ValueError):
         return None
 
 
+class _TracingFTP(ftplib.FTP):
+    """ftplib mit Mitschnitt: der letzte Dialog steht bei einem Fehler im Log
+    und macht aus 'irgendwas mit FTP' eine konkrete Diagnose."""
+
+    trace = None
+
+    def putline(self, line):
+        self._note(">", line)
+        return ftplib.FTP.putline(self, line)
+
+    def getline(self):
+        line = ftplib.FTP.getline(self)
+        self._note("<", line)
+        return line
+
+    def _note(self, arrow, line):
+        if self.trace is None:
+            return
+        text = str(line).rstrip("\r\n")
+        if text.upper().startswith("PASS"):
+            text = "PASS ***"
+        self.trace.append("%s %s" % (arrow, text))
+
+
 class FtpClient(object):
-    """Duenne Huelle um ftplib mit Wiederverbindung und Timeouts."""
+    """Eine FTP-Verbindung mit gemerktem Arbeitsordner und Selbstheilung."""
 
     def __init__(self, host, port=21, user="", password="", timeout=FTP_TIMEOUT):
         self.host, self.port = host, int(port or 21)
         self.user, self.password = user or "", password or ""
         self.timeout = timeout
         self.ftp = None
+        self.cwd_path = None
+        self.trace = collections.deque(maxlen=TRACE_MAX)
+
+    # ---- Verbindung -------------------------------------------------------
 
     def connect(self):
         self.close()
-        ftp = ftplib.FTP()
+        ftp = _TracingFTP()
+        ftp.trace = self.trace
         ftp.encoding = "utf-8"
+        self.trace.append("--- verbinde mit %s:%d ---" % (self.host, self.port))
         ftp.connect(self.host, self.port, timeout=self.timeout)
         ftp.login(self.user or "anonymous", self.password or "anonymous@")
         ftp.set_pasv(True)
+        self.ftp = ftp
+        self.cwd_path = None
         try:
             ftp.voidcmd("TYPE I")
         except ftplib.all_errors:
             pass
-        self.ftp = ftp
         return ftp
 
     def ensure(self):
-        if self.ftp is None:
-            self.connect()
+        """Liefert eine benutzbare Verbindung und stellt den Ordner wieder her."""
+        if self.ftp is not None:
+            return self.ftp
+        wanted = self.cwd_path
+        self.connect()
+        if wanted and wanted != "/":
+            try:
+                self.ftp.cwd(wanted)
+                self.cwd_path = wanted
+            except ftplib.all_errors:
+                self.cwd_path = None
         return self.ftp
-
-    def binary(self):
-        """Verzeichnislisten schalten ftplib still auf ASCII um - vor jedem
-        Datentransfer und jeder SIZE-Abfrage wieder auf binaer stellen, sonst
-        wuerden Clips beim Kopieren veraendert."""
-        ftp = self.ensure()
-        ftp.voidcmd("TYPE I")
-        return ftp
 
     def close(self):
         if self.ftp is not None:
@@ -209,89 +240,155 @@ class FtpClient(object):
                 except Exception:
                     pass
         self.ftp = None
+        self.cwd_path = None
 
-    # ---- Listen -----------------------------------------------------------
+    def drop(self, reason=""):
+        """Verbindung wegwerfen, weil der Dialog nicht mehr stimmt."""
+        if reason:
+            self.trace.append("--- Verbindung verworfen: %s ---" % reason)
+        self.close()
 
-    def list_dir(self, path):
-        """[(name, is_dir, size, mtime)] - probiert MLSD, dann LIST, dann NLST."""
+    def dialog(self):
+        return list(self.trace)
+
+    def binary(self):
+        """NLST laeuft ueber TYPE A - vor SIZE und RETR zurueck auf binaer."""
         ftp = self.ensure()
         try:
-            entries = []
-            for name, facts in ftp.mlsd(path or "/", ["type", "size", "modify"]):
-                kind = facts.get("type", "file")
-                if name in (".", "..") or kind in ("cdir", "pdir"):
-                    continue
-                is_dir = kind == "dir"
-                size = int(facts.get("size", 0) or 0)
-                entries.append((name, is_dir, size, parse_mlsd_time(facts.get("modify"))))
-            return entries
-        except (ftplib.error_perm, ftplib.error_temp, ftplib.error_proto, ValueError):
-            pass
-        lines = []
+            ftp.voidcmd("TYPE I")
+        except (ftplib.error_reply, ftplib.error_proto) as exc:
+            self.drop("TYPE I: %s" % exc)
+            ftp = self.ensure()
+            ftp.voidcmd("TYPE I")
+        return ftp
+
+    # ---- Grundbefehle -----------------------------------------------------
+
+    def chdir(self, path):
+        """Wechselt in den Ordner. Alles danach benutzt blanke Dateinamen."""
+        path = path or "/"
+        ftp = self.ensure()
+        if self.cwd_path == path:
+            return ftp
         try:
-            ftp.retrlines("LIST " + (path or "/"), lines.append)
-            entries = [parse_list_line(l) for l in lines]
-            parsed = [e for e in entries if e is not None]
-            if parsed or not lines:
-                return [e for e in parsed if e[0] not in (".", "..")]
-        except (ftplib.error_perm, ftplib.error_temp, ftplib.error_proto):
-            pass
-        names = ftp.nlst(path or "/")
-        entries = []
-        for raw in names:
-            name = raw.rsplit("/", 1)[-1]
-            if name in (".", ".."):
-                continue
-            full = join_ftp(path, name)
+            ftp.cwd(path)
+        except ftplib.error_perm as exc:
+            raise NotADirectory("%s (%s)" % (path, exc))
+        except (ftplib.error_reply, ftplib.error_proto, EOFError, OSError) as exc:
+            self.drop("CWD %s: %s" % (path, exc))
+            ftp = self.ensure()
             try:
-                size = ftp.size(full)
-                entries.append((name, False, int(size or 0), None))
-            except ftplib.all_errors:
-                entries.append((name, True, 0, None))     # SIZE scheitert -> Ordner
-        return entries
+                ftp.cwd(path)
+            except ftplib.error_perm as exc2:
+                raise NotADirectory("%s (%s)" % (path, exc2))
+        self.cwd_path = path
+        return ftp
 
-    def walk(self, root, max_depth=4):
-        """Alle Dateien unter root als FileInfo mit relativem Pfad."""
-        files = []
-        stack = [("", 0)]
-        while stack:
-            rel, depth = stack.pop()
-            path = join_ftp(root, rel) if rel else (root or "/")
-            for name, is_dir, size, mtime in self.list_dir(path):
-                if name.startswith("."):
-                    continue
-                child = "%s/%s" % (rel, name) if rel else name
-                if is_dir:
-                    if depth < max_depth:
-                        stack.append((child, depth + 1))
-                elif size > 0:
-                    files.append(FileInfo(child, size, mtime))
-        files.sort(key=lambda f: f.path)
-        return files
-
-    # ---- Groesse / Ordner am Ziel ------------------------------------------
-
-    def size_of(self, path):
+    def list_names(self, path):
+        """Dateinamen im Ordner - nur NLST, das kann jeder FTP-Server."""
+        self.chdir(path)
         try:
-            return int(self.binary().size(path) or 0)
-        except ftplib.all_errors:
+            raw_names = self.ensure().nlst()
+        except ftplib.error_perm as exc:
+            if str(exc)[:3] in ("450", "550"):
+                return []                       # leerer Ordner
+            raise
+        except (ftplib.error_reply, ftplib.error_proto, EOFError, OSError) as exc:
+            self.drop("NLST %s: %s" % (path, exc))
+            self.chdir(path)
+            raw_names = self.ensure().nlst()
+        names = []
+        for raw in raw_names:
+            name = str(raw).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].strip()
+            if name and name not in (".", "..") and name not in names:
+                names.append(name)
+        return sorted(names)
+
+    def size(self, name):
+        """Groesse einer Datei im aktuellen Ordner - None, wenn es keine ist."""
+        ftp = self.binary()
+        try:
+            value = ftp.size(name)
+        except ftplib.error_perm:
+            return None                         # meist ein Ordner
+        except (ftplib.error_reply, ftplib.error_proto, EOFError, OSError) as exc:
+            self.drop("SIZE %s: %s" % (name, exc))
             return None
+        return None if value is None else int(value)
+
+    def mdtm(self, name):
+        """Aufnahmezeitpunkt laut Deck - None, wenn das Deck MDTM nicht kann."""
+        try:
+            resp = self.ensure().sendcmd("MDTM " + name)
+        except ftplib.error_perm:
+            return None
+        except (ftplib.error_reply, ftplib.error_proto, EOFError, OSError) as exc:
+            self.drop("MDTM %s: %s" % (name, exc))
+            return None
+        return parse_mdtm(resp[3:]) if resp[:3] == "213" else None
+
+    def retrieve(self, folder, name, callback, blocksize=CHUNK):
+        """Laedt eine Datei blockweise. retrbinary setzt TYPE I selbst und
+        liest die Abschlussantwort sauber weg - genau das, was fehlte."""
+        self.chdir(folder or "/")
+        self.ensure().retrbinary("RETR " + name, callback, blocksize)
+
+    # ---- fuer FTP-Ziele ---------------------------------------------------
+
+    def size_of_path(self, path):
+        """Groesse ueber einen vollen Pfad (nur fuer Ziel-Server benutzt)."""
+        folder, _, name = str(path).rpartition("/")
+        try:
+            self.chdir(folder or "/")
+        except NotADirectory:
+            return None
+        return self.size(name)
 
     def makedirs(self, path):
         ftp = self.ensure()
-        current = "/" if path.startswith("/") else ""
-        for part in [p for p in path.split("/") if p]:
+        current = "/" if str(path).startswith("/") else ""
+        for part in [p for p in str(path).split("/") if p]:
             current = join_ftp(current, part) if current else part
             try:
                 ftp.mkd(current)
             except ftplib.error_perm:
-                pass                # existiert bereits (550)
+                pass                            # existiert bereits (550)
+        self.cwd_path = None
 
     def delete(self, path):
         try:
             self.ensure().delete(path)
         except ftplib.all_errors:
             pass
+
+    # ---- Durchlauf --------------------------------------------------------
+
+    def walk(self, root, max_depth=3):
+        """Alle Dateien unter root als FileInfo mit relativem Pfad."""
+        files = []
+        self._walk(root or "/", "", 0, max_depth, files)
+        files.sort(key=lambda f: f.path)
+        return files
+
+    def _walk(self, abs_dir, rel, depth, max_depth, files):
+        names = self.list_names(abs_dir)
+        folders = []
+        for name in names:
+            if name.startswith("."):
+                continue
+            child = "%s/%s" % (rel, name) if rel else name
+            size = self.size(name)
+            if size:                            # > 0 -> eindeutig eine Datei
+                files.append(FileInfo(child, size, self.mdtm(name)))
+            else:
+                folders.append((name, child))
+        for name, child in folders:
+            if depth >= max_depth:
+                continue
+            try:
+                self._walk(join_ftp(abs_dir, name), child, depth + 1, max_depth, files)
+            except NotADirectory:
+                continue                        # doch eine Datei (0 Bytes)
 
 
 # --------------------------------------------------------------------------
@@ -351,6 +448,9 @@ class LocalSink(object):
                         pass
         return Writer()
 
+    def dialog(self):
+        return []
+
     def close(self):
         pass
 
@@ -372,21 +472,24 @@ class FtpSink(object):
             raise BackupError("Kein FTP-Server als Ziel eingestellt")
         self.client.connect()
         self.client.makedirs(self.root)
-        probe = join_ftp(self.root, PROBE_NAME)
-        import io
-        self.client.ensure().storbinary("STOR " + probe, io.BytesIO(b"ok"))
-        self.client.delete(probe)
+        self.client.chdir(self.root)
+        self.client.binary().storbinary("STOR " + PROBE_NAME, io.BytesIO(b"ok"))
+        self.client.delete(PROBE_NAME)
 
     def size_of(self, rel):
-        return self.client.size_of(join_ftp(self.root, rel))
+        return self.client.size_of_path(join_ftp(self.root, rel))
+
+    def dialog(self):
+        return self.client.dialog()
 
     def begin_write(self, rel):
         client = self.client
         final = join_ftp(self.root, rel)
-        folder = final.rsplit("/", 1)[0] if "/" in final else ""
+        folder, _, name = final.rpartition("/")
         if folder:
             client.makedirs(folder)
-        part = final + PART_SUFFIX
+        client.chdir(folder or "/")
+        part = name + PART_SUFFIX
         ftp = client.binary()
         conn = ftp.transfercmd("STOR " + part)
 
@@ -398,10 +501,10 @@ class FtpSink(object):
                 conn.close()
                 ftp.voidresp()
                 try:
-                    ftp.delete(final)      # falls ein Rest mit gleichem Namen liegt
+                    ftp.delete(name)       # falls ein Rest mit gleichem Namen liegt
                 except ftplib.all_errors:
                     pass
-                ftp.rename(part, final)
+                ftp.rename(part, name)
 
             def abort(self_inner):
                 try:
@@ -413,7 +516,7 @@ class FtpSink(object):
                 except Exception:
                     pass
                 client.delete(part)
-                client.close()             # Steuerkanal koennte verwirrt sein
+                client.drop("STOR abgebrochen")   # Steuerkanal koennte verwirrt sein
         return Writer()
 
     def close(self):
@@ -547,12 +650,24 @@ class Mirror(object):
             return 0
         return max(0, int(self._last_run_mono + interval - time.monotonic()))
 
-    def _log_error(self, text):
-        """Dieselbe Stoerung nur alle 10 Minuten melden."""
+    def _log_error(self, text, source=None):
+        """Dieselbe Stoerung nur alle 10 Minuten melden - beim ersten Mal mit
+        dem FTP-Dialog, damit man sieht, was das Deck tatsaechlich geantwortet hat."""
         now = time.monotonic()
         if text != self._last_error_text or now - self._last_error_at > 600:
             self._last_error_text, self._last_error_at = text, now
             self.log(text, "err")
+            if source is not None:
+                self.log_dialog(source)
+
+    def log_dialog(self, source, limit=25):
+        try:
+            lines = source.dialog()[-limit:]
+        except Exception:
+            return
+        if lines:
+            self.log("FTP-Dialog (letzte %d Zeilen):\n    %s"
+                     % (len(lines), "\n    ".join(lines)))
 
     def _loop(self):
         while not self._stop.is_set():
@@ -591,6 +706,7 @@ class Mirror(object):
             self._update_tree(files)
         except Exception as exc:
             results.append("Deck-FTP FEHLER: %s" % exc)
+            self.log_dialog(source)
         finally:
             source.close()
         sink = make_sink(cfg)
@@ -716,8 +832,8 @@ class Mirror(object):
                     raise
                 except Exception as exc:
                     failed.append(f.path)
-                    self._log_error("Sicherung: %s fehlgeschlagen - %s" % (f.path, exc))
-                    source.close()          # naechste Datei mit frischer Verbindung
+                    self._log_error("Sicherung: %s fehlgeschlagen - %s" % (f.path, exc), source)
+                    source.drop("nach Fehler")   # naechste Datei mit frischer Verbindung
                 self._set(files_done=index, bytes_done=copied_bytes)
 
             self._pending_paths = set(failed) | set(f.path for f in unsure)
@@ -741,7 +857,7 @@ class Mirror(object):
             self.log("Sicherung abgebrochen.", "warn")
         except Exception as exc:
             self._set(error=str(exc), last_result="Fehler: %s" % exc)
-            self._log_error("Sicherung fehlgeschlagen: %s" % exc)
+            self._log_error("Sicherung fehlgeschlagen: %s" % exc, source)
         finally:
             source.close()
             sink.close()
@@ -765,38 +881,45 @@ class Mirror(object):
         return candidate
 
     def _copy(self, source, sink, info, rel):
-        ftp = source.binary()
-        src_path = join_ftp(self.get_settings().get("backup_source_path") or "/", info.path)
-        conn, _size = ftp.ntransfercmd("RETR " + src_path)
-        conn.settimeout(FTP_TIMEOUT)
+        """Laedt eine Datei ueber retrbinary - ftplib kuemmert sich dabei um
+        Datenverbindung und Abschlussantwort, was den Steuerkanal sauber haelt."""
+        root = self.get_settings().get("backup_source_path") or "/"
+        folder = join_ftp(root, info.folder) if info.folder else root
         writer = sink.begin_write(rel)
-        done = 0
-        last_tick, last_bytes = time.monotonic(), 0
+        started = time.monotonic()
+        tick = {"done": 0, "at": started, "bytes": 0, "logged": started, "speed": 0.0}
+
+        def block(data):
+            if self._cancel.is_set():
+                raise BackupCancelled()
+            writer.write(data)
+            tick["done"] += len(data)
+            now = time.monotonic()
+            if now - tick["at"] < 0.5:
+                return
+            tick["speed"] = (tick["done"] - tick["bytes"]) / (now - tick["at"])
+            tick["at"], tick["bytes"] = now, tick["done"]
+            self._set(current_done=tick["done"], speed=tick["speed"])
+            if now - tick["logged"] >= LOG_PROGRESS_S:
+                tick["logged"] = now
+                self.log("Sicherung: %s %s" % (info.path, progress_text(
+                    tick["done"], info.size, tick["speed"])))
+
         try:
-            while True:
-                if self._cancel.is_set():
-                    raise BackupCancelled()
-                chunk = conn.recv(CHUNK)
-                if not chunk:
-                    break
-                writer.write(chunk)
-                done += len(chunk)
-                now = time.monotonic()
-                if now - last_tick >= 0.5:
-                    speed = (done - last_bytes) / (now - last_tick)
-                    self._set(current_done=done, speed=speed)
-                    last_tick, last_bytes = now, done
-            conn.close()
-            ftp.voidresp()
-            if done != info.size:
-                raise BackupError("Groesse stimmt nicht (%d statt %d Bytes)" % (done, info.size))
+            source.retrieve(folder, info.name, block, CHUNK)
+            if tick["done"] != info.size:
+                raise BackupError("Groesse stimmt nicht (%d statt %d Bytes)"
+                                  % (tick["done"], info.size))
             writer.commit()
         except BaseException:
-            try:
-                conn.close()
-            except Exception:
-                pass
             writer.abort()
+            # Nach Abbruch oder Fehler steht die Verbindung mitten im Transfer.
+            # Sie wird weggeworfen, damit die naechste Datei sauber startet.
+            source.drop("Uebertragung abgebrochen")
             raise
         finally:
-            self._set(current_done=done)
+            self._set(current_done=tick["done"])
+        took = max(0.001, time.monotonic() - started)
+        self.log("Sicherung: %s fertig - %s in %s (%s/s)" % (
+            info.path, human_size(info.size), duration_text(took),
+            human_size(info.size / took)))

@@ -13,7 +13,9 @@ import tempfile
 import threading
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, ".."))
 import hyperdeck_backup as hb  # noqa: E402
 
 try:
@@ -74,26 +76,6 @@ def list_tree(root):
 
 # ---------------------------------------------------------------- reine Logik
 
-def test_parse_list_lines():
-    now = datetime.datetime(2026, 9, 12, 12, 0)
-    name, is_dir, size, mtime = hb.parse_list_line(
-        "-rw-r--r--   1 ftp ftp  123456789 Sep 12 09:00 HyperDeck_0001.mov", now)
-    assert (name, is_dir, size) == ("HyperDeck_0001.mov", False, 123456789)
-    assert mtime == datetime.datetime(2026, 9, 12, 9, 0)
-    name, is_dir, size, mtime = hb.parse_list_line(
-        "drwxr-xr-x   2 ftp ftp       4096 Jan 03  2025 sd1", now)
-    assert (name, is_dir, mtime) == ("sd1", True, datetime.datetime(2025, 1, 3))
-    name, is_dir, size, mtime = hb.parse_list_line(
-        "-rw-r--r--   1 ftp ftp  10 Dec 30 23:59 mit Leerzeichen.mov", now)
-    assert name == "mit Leerzeichen.mov" and mtime.year == 2025      # Jahreswechsel
-    name, is_dir, size, mtime = hb.parse_list_line(
-        "09-12-26  09:00AM             5000 clip.mp4", now)
-    assert (name, size, mtime) == ("clip.mp4", 5000, datetime.datetime(2026, 9, 12, 9, 0))
-    name, is_dir, size, mtime = hb.parse_list_line("09-12-26  01:30PM       <DIR>          sd2", now)
-    assert (name, is_dir, mtime.hour) == ("sd2", True, 13)
-    assert hb.parse_list_line("total 12", now) is None
-
-
 def test_names():
     info = hb.FileInfo("sd1/HyperDeck_0001.mov", 100, datetime.datetime(2026, 9, 12, 9, 0, 13))
     assert hb.target_name(info) == "2026-09-12_09-00-13_HyperDeck_0001.mov"
@@ -104,6 +86,7 @@ def test_names():
     assert hb.join_ftp("/sicherung/", "/sd1/") == "/sicherung/sd1"
     assert (info.top, info.folder, info.name) == ("sd1", "sd1", "HyperDeck_0001.mov")
     assert hb.human_size(1536) == "1,5 KB" and hb.human_size(5) == "5 B"
+    assert hb.n_files(1) == "1 Datei" and hb.n_files(3) == "3 Dateien"
 
 
 # ---------------------------------------------------------------- mit FTP-Servern
@@ -255,11 +238,100 @@ def run_server_tests():
     shutil.rmtree(work, ignore_errors=True)
 
 
+def test_hyperdeck_quirks():
+    """Der HyperDeck kennt kein MLSD, mag keine absoluten Pfade und laesst nach
+    einem abgelehnten Datenbefehl eine 226 im Steuerkanal liegen. Genau daran
+    ist die Sicherung in Version 3.1.0 gescheitert."""
+    if not HAVE_FTPD:
+        return
+    from fake_deck_ftp import make_server
+    work = tempfile.mkdtemp(prefix="deckquirk_")
+    try:
+        os.makedirs(os.path.join(work, "sd1"))
+        os.makedirs(os.path.join(work, "sd2"))
+        write_file(os.path.join(work, "sd1", "HyperDeck_0001.mov"), 300000)
+        write_file(os.path.join(work, "sd1", "HyperDeck_0002.mov"), 150000)
+        write_file(os.path.join(work, "sd2", "HyperDeck_0001.mov"), 90000)
+        server, port = make_server(work)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+
+        # So sah der Fehler aus: MLSD scheitert und vergiftet den Steuerkanal.
+        import ftplib
+        raw = ftplib.FTP()
+        raw.connect("127.0.0.1", port, timeout=10)
+        raw.login()
+        try:
+            list(raw.mlsd("/", ["type", "size"]))
+            assert False, "MLSD sollte scheitern"
+        except ftplib.error_perm:
+            pass
+        try:
+            raw.retrlines("LIST /", lambda line: None)
+            poisoned = False
+        except ftplib.error_reply:
+            poisoned = True            # der Folgefehler, den der Nutzer sah
+        assert poisoned, "Steuerkanal muesste jetzt verschoben sein"
+        try:
+            raw.close()
+        except Exception:
+            pass
+
+        # Und so geht es richtig: CWD + NLST + SIZE + MDTM + RETR
+        client = hb.FtpClient("127.0.0.1", port)
+        files = client.walk("/")
+        assert {f.path for f in files} == {
+            "sd1/HyperDeck_0001.mov", "sd1/HyperDeck_0002.mov", "sd2/HyperDeck_0001.mov"}, files
+        assert all(f.mtime is not None for f in files), "MDTM fehlt"
+        assert [f.size for f in sorted(files, key=lambda f: f.path)] == [300000, 150000, 90000]
+
+        blocks = []
+        client.retrieve("/sd1", "HyperDeck_0001.mov", blocks.append, 65536)
+        with open(os.path.join(work, "sd1", "HyperDeck_0001.mov"), "rb") as fh:
+            assert b"".join(blocks) == fh.read(), "Kopie nicht bitgenau"
+        assert len(client.walk("/")) == 3, "Verbindung nach dem Download unbrauchbar"
+        assert any("CWD" in line for line in client.dialog()), client.dialog()
+
+        # Kompletter Lauf ueber den Mirror gegen dasselbe Deck
+        target = os.path.join(work, "ziel")
+        cfg = {
+            "deck_ip": "127.0.0.1", "deck_ftp_port": port, "deck_ftp_user": "", "deck_ftp_pass": "",
+            "backup_enabled": False, "backup_interval": 15, "backup_mode": "folder",
+            "backup_folder": target, "backup_source_path": "/", "backup_block_format": True,
+            "backup_ftp_host": "", "backup_ftp_port": 21, "backup_ftp_user": "",
+            "backup_ftp_pass": "", "backup_ftp_path": "/",
+        }
+        mirror = hb.Mirror(lambda: dict(cfg), log)
+        mirror._run_pass(cfg, reason="Test")
+        state = mirror.snapshot()
+        assert state["error"] == "" and state["files_done"] == 3, state
+        copied = list_tree(target)
+        assert len(copied) == 3, copied
+        assert all(name.split("/")[-1][:2] == "20" for name, _ in copied), copied
+        mirror._run_test(cfg)
+        assert "Deck-FTP OK" in mirror.snapshot()["last_test"], mirror.snapshot()["last_test"]
+        client.close()
+        server.close_all()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_progress_text():
+    assert hb.duration_text(45) == "45 s"
+    assert hb.duration_text(90) == "1:30 min"
+    assert hb.duration_text(7200) == "2:00 h"
+    text = hb.progress_text(50 * 1024 * 1024, 100 * 1024 * 1024, 10 * 1024 * 1024)
+    assert text.startswith("50 % (50,0 MB von 100,0 MB)"), text
+    assert "10,0 MB/s" in text and "noch etwa 5 s" in text, text
+    assert hb.parse_mdtm("20260912090013") == datetime.datetime(2026, 9, 12, 9, 0, 13)
+    assert hb.parse_mdtm("Unsinn") is None
+
+
 if __name__ == "__main__":
-    test_parse_list_lines(); print("ok  LIST-Parser")
+    test_progress_text(); print("ok  Tacho-Texte")
     test_names();            print("ok  Namensbildung")
     if HAVE_FTPD:
-        run_server_tests();  print("ok  Servertests")
+        test_hyperdeck_quirks(); print("ok  HyperDeck-Eigenheiten")
+        run_server_tests();      print("ok  Servertests")
     else:
         print("!!  pyftpdlib fehlt - Servertests uebersprungen")
     print("Alle Backup-Tests bestanden.")

@@ -13,6 +13,49 @@ PATCH bei Fehlerbehebungen.
 
 ---
 
+## [3.1.1] – 2026-09-12
+
+### Behoben
+- **Die Sicherung scheiterte am echten Gerät** mit „226 Closing data
+  connection“. Ursache: Der FTP-Server im HyperDeck kennt `MLSD` und `LIST`
+  nicht und lässt nach einem abgelehnten Datenbefehl eine unbeantwortete
+  `226` im Steuerkanal liegen. Der nächste Befehl liest sie als seine eigene
+  Antwort – ab da ist der Dialog um eine Zeile verschoben, und irgendwann
+  meldet ftplib genau diese `226` als Fehler.
+  Die FTP-Schicht benutzt jetzt nur noch den kleinsten Befehlssatz, den das
+  Gerät sicher beherrscht: `CWD` in den Ordner, dann `NLST`, `SIZE`, `MDTM`
+  und `RETR` mit **blanken Dateinamen** (absolute Pfade lehnt das Deck ab).
+  Der Download läuft über `retrbinary`, das die Abschlussantwort sauber
+  wegliest. Bei jedem Verdacht auf einen verschobenen Dialog wird die
+  Verbindung weggeworfen und neu aufgebaut.
+- **„Timecode auf Uhrzeit“ blieb wirkungslos.** Es wurde nur
+  `configuration: timecode preset` gesendet. Das Deck benutzt den Preset aber
+  nur, wenn sein Timecode-Eingang auf `preset` steht – sonst zählt es den
+  Timecode aus dem Videosignal weiter. Jetzt wird
+  `configuration: timecode input: preset` mitgesendet und die gesetzte Uhrzeit
+  im Log bestätigt.
+
+### Neu
+- **Tacho im Ereignis-Log:** während langer Übertragungen alle 30 Sekunden
+  eine Zeile mit Prozent, übertragener Menge, Geschwindigkeit und Restzeit,
+  dazu je Datei eine Abschlusszeile mit Dauer und Schnitt.
+- **FTP-Dialog im Log:** Geht etwas schief, stehen die letzten Zeilen des
+  tatsächlichen FTP-Gesprächs im Log – Fehlersuche ohne Raten.
+- **Abfrageintervall ab 1 Sekunde** einstellbar (vorher 5). Der Kartenstatus
+  wird dabei auf höchstens alle 5 Sekunden ausgedünnt und Auto-Record
+  versucht einen Neustart höchstens alle 10 Sekunden, damit ein kurzes
+  Intervall das Deck nicht mit Befehlen überzieht.
+- `tests/fake_deck_ftp.py`: FTP-Simulator, der die Eigenheiten des Decks
+  nachbildet. Der Regressionstest weist beides nach – dass der alte Weg
+  scheitert und der neue durchläuft.
+
+### Hinweis
+- Datum und Uhrzeit des Decks lassen sich über das Ethernet-Protokoll **nicht**
+  setzen; der dokumentierte Befehlssatz kennt dafür nichts. Die Uhr wird am
+  Gerät selbst gestellt. Sie bestimmt die Zeitstempel in den Zieldateinamen.
+
+---
+
 ## [3.1.0] – 2026-09-12
 
 ### Neu

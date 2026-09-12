@@ -63,7 +63,7 @@ except ImportError:
 # Konfiguration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "3.2.0"       # wird in der Web-Oberflaeche und im Log angezeigt
+APP_VERSION = "3.3.0"       # wird in der Web-Oberflaeche und im Log angezeigt
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # Ablage fuer Konfiguration und Logdatei. Ueber die Umgebungsvariable
 # HYPERDECK_HOME laesst sich ein anderer Ordner waehlen - z. B. fuer eine
@@ -93,6 +93,7 @@ DEFAULT_SETTINGS = {
     "auto_record": True,
     "auto_loop": True,
     "sync_timecode": True,          # Timecode beim Start auf Uhrzeit setzen
+    "timecode_live": True,          # Deck schickt den Timecode laufend mit
     "format_filesystem": "exFAT",   # exFAT oder HFS+
     "format_name": "LoopDump",
     "timer_enabled": False,         # Zeitgesteuerte Aufnahme (Timer-Recording)
@@ -131,6 +132,7 @@ SETTING_TYPES = {
     "auto_record": bool,
     "auto_loop": bool,
     "sync_timecode": bool,
+    "timecode_live": bool,
     "format_filesystem": str,
     "format_name": str,
     "timer_enabled": bool,
@@ -224,6 +226,7 @@ STATE = {
     "timer_active": None,       # Nummer (1..3) des laufenden Zeitfensters
     "timer_info": "Timer aus",  # Klartext fuer die Oberflaeche
     "notify": False,            # Deck meldet Aenderungen von selbst
+    "timecode_stream": False,   # Timecode kommt laufend statt nur bei Abfragen
 }
 _state_lock = threading.RLock()
 
@@ -806,13 +809,23 @@ def apply_slot(data):
 
 
 def apply_transport(data):
-    """Uebernimmt eine Transport-Meldung (abgefragt oder unaufgefordert)."""
-    status = (data.get("status") or "unbekannt").lower()
-    timecode = data.get("timecode") or data.get("display timecode") or "--:--:--:--"
+    """Uebernimmt eine Transport-Meldung (abgefragt oder unaufgefordert).
+
+    Fehlende Felder behalten ihren bisherigen Wert - sonst wuerde eine
+    Kurzmeldung den Status auf "unbekannt" setzen und die Automatik losschicken.
+    Liefert (status, aktiver slot, hat_sich_geaendert)."""
     raw_slot = (data.get("slot id") or "").strip()
-    active = int(raw_slot) if raw_slot.isdigit() and raw_slot != "0" else None
-    set_state(status=status, timecode=timecode, active_slot=active)
-    return status, active
+    with _state_lock:
+        status = (data.get("status") or STATE["status"] or "unbekannt").lower()
+        timecode = (data.get("timecode") or data.get("display timecode")
+                    or STATE["timecode"] or "--:--:--:--")
+        if raw_slot:
+            active = int(raw_slot) if raw_slot.isdigit() and raw_slot != "0" else None
+        else:
+            active = STATE["active_slot"]
+        changed = status != STATE["status"] or active != STATE["active_slot"]
+        STATE.update(status=status, timecode=timecode, active_slot=active)
+    return status, active, changed
 
 
 def handle_async(reply):
@@ -820,29 +833,45 @@ def handle_async(reply):
     Hier wird nur der Zustand nachgezogen - die Automatik laeuft danach in der
     Worker-Schleife, damit sich kein Befehl in einen anderen verschachtelt."""
     if reply.code == ASYNC_TRANSPORT:
-        status, _active = apply_transport(reply.data)
-        _async_seen["transport"] = True
-        log_throttled("async-transport-%s" % status,
-                      "Deck meldet: %s" % status, period=5)
+        # Bei "display timecode" kommt diese Meldung pro Bild. Nur echte
+        # Zustandswechsel sollen Log und Automatik beschaeftigen.
+        status, _active, changed = apply_transport(reply.data)
+        if changed:
+            _async_seen["transport"] = True
+            log("Deck meldet: %s" % status)
     elif reply.code == ASYNC_SLOT:
         info = apply_slot(reply.data)
         if info is not None:
             _async_seen["slot"] = True
 
 
-def enable_notifications():
+def enable_notifications(announce=True):
     """Abonniert die Meldungen des Decks. Klappt das nicht, wird weiter
-    abgefragt - die Automatik funktioniert in beiden Faellen."""
+    abgefragt - die Automatik funktioniert in beiden Faellen.
+
+    "display timecode" laesst das Deck den Transportblock bei jeder
+    Timecode-Aenderung schicken, also im Bildtakt. Das sind ein paar KB pro
+    Sekunde im LAN und macht die Zeitanzeige laufend - abschaltbar, falls das
+    Geraet oder das Netz es nicht mag."""
+    live = get_settings()["timecode_live"]
+    wanted = [("transport", True), ("slot", True), ("display timecode", live)]
     ok = True
-    for what in ("transport", "slot"):
-        reply = deck.command("notify: %s: true" % what)
+    for what, state in wanted:
+        reply = deck.command("notify: %s: %s" % (what, "true" if state else "false"))
         if not reply.ok:
+            if what == "display timecode":
+                log("Deck kennt 'notify: display timecode' nicht (%s%s) - der "
+                    "Timecode kommt weiter nur mit der Kontrollabfrage."
+                    % (reply, reply.hint()), "warn")
+                live = False
+                continue
             ok = False
             log("Deck nimmt 'notify: %s' nicht an (%s%s) - es wird weiter "
                 "regelmaessig abgefragt." % (what, reply, reply.hint()), "warn")
-    set_state(notify=ok)
-    if ok:
-        log("Das Deck meldet Aenderungen ab jetzt von selbst.", "ok")
+    set_state(notify=ok, timecode_stream=bool(ok and live))
+    if ok and announce:
+        log("Das Deck meldet Aenderungen ab jetzt von selbst%s."
+            % (" - den Timecode laufend" if live else ""), "ok")
     return ok
 
 
@@ -861,7 +890,8 @@ def read_transport():
         log_throttled("transport", "Deck antwortet auf 'transport info' mit %s%s"
                       % (transport, transport.hint()), "err")
         return None
-    return apply_transport(transport.data)
+    status, active, _changed = apply_transport(transport.data)
+    return status, active
 
 
 def poll_deck():
@@ -1128,6 +1158,8 @@ def handle_job(job):
         log("Verbindung wird auf Wunsch neu aufgebaut.")
         deck.close()
         set_state(connected=False, status="offline")
+    elif action == "notify":
+        enable_notifications(announce=False)
     elif action == "poll":
         _poll_pending.clear()   # loest nur die sofortige Abfrage aus
 
@@ -1154,7 +1186,8 @@ def worker_loop():
             except Exception as exc:
                 deck.close()
                 set_state(connected=False, busy="", status="offline", notify=False,
-                          connection_error=str(exc), seconds_until_check=0)
+                          timecode_stream=False, connection_error=str(exc),
+                          seconds_until_check=0)
                 log_throttled("connect", "Keine Verbindung zu %s:%d - %s"
                               % (cfg["deck_ip"], cfg["deck_port"], exc), "err", period=30)
                 shutdown.wait(backoff)
@@ -1203,14 +1236,14 @@ def worker_loop():
             log("Verbindung gestoert: %s - baue neu auf." % exc, "warn")
             deck.close()
             set_state(connected=False, busy="", status="offline", notify=False,
-                      connection_error=str(exc))
+                      timecode_stream=False, connection_error=str(exc))
             shutdown.wait(1.0)
             continue
         except OSError as exc:
             log("Netzwerkfehler: %s - baue neu auf." % exc, "warn")
             deck.close()
             set_state(connected=False, busy="", status="offline", notify=False,
-                      connection_error=str(exc))
+                      timecode_stream=False, connection_error=str(exc))
             shutdown.wait(1.0)
             continue
         except Exception as exc:  # darf den Thread niemals beenden
@@ -1360,7 +1393,7 @@ def api_command():
         backup.cancel()
         return jsonify(ok=True)
 
-    if action not in ("record", "stop", "format", "reconnect"):
+    if action not in ("record", "stop", "format", "reconnect", "notify"):
         return jsonify(ok=False, error="Unbekannter Befehl"), 400
     if jobs.qsize() > 50:
         return jsonify(ok=False, error="Zu viele Befehle in der Warteschlange"), 429
@@ -1400,6 +1433,8 @@ def api_settings():
             % ", ".join(describe_change(k, v) for k, v in sorted(changed.items())))
         if "deck_ip" in changed or "deck_port" in changed:
             jobs.put({"action": "reconnect"})
+        elif "timecode_live" in changed:
+            jobs.put({"action": "notify"})
         elif not all(k.startswith("backup_") or k.startswith("deck_ftp") for k in changed):
             request_poll()
     settings = get_settings()

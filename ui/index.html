@@ -82,6 +82,11 @@
         <input type="checkbox" id="sw_sync_timecode" onchange="setFlag('sync_timecode',this.checked)">
         <span class="track" id="tr_sync_timecode"></span>
       </label>
+      <label class="sw">
+        <div><div class="t">Timecode läuft mit</div><div class="d" id="tcLiveHint">Das Deck schickt den Timecode laufend statt nur bei der Kontrollabfrage</div></div>
+        <input type="checkbox" id="sw_timecode_live" onchange="setFlag('timecode_live',this.checked)">
+        <span class="track" id="tr_timecode_live"></span>
+      </label>
     </div>
   </div>
 

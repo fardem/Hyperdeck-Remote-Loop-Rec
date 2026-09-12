@@ -484,7 +484,8 @@ async function refresh(){
   busyNow = d.busy || '';
   paintCountdown();
   $('pollLabel').textContent = d.notify
-    ? 'Das Deck meldet Änderungen sofort · Kontrollabfrage in '
+    ? ((d.timecode_stream ? 'Timecode und Zustand kommen live vom Deck'
+                          : 'Das Deck meldet Änderungen sofort') + ' · Kontrollabfrage in ')
     : 'Nächste Abfrage in ';
   $('lastPoll').textContent = d.last_poll ? ('zuletzt ' + d.last_poll) : '';
 
@@ -511,6 +512,10 @@ async function refresh(){
   setSwitch('auto_loop', d.auto_loop);
   setSwitch('sync_timecode', d.sync_timecode);
   setSwitch('timer_enabled', d.timer_enabled);
+  setSwitch('timecode_live', d.timecode_live);
+  $('tcLiveHint').textContent = d.timecode_stream
+    ? 'Läuft – das Deck schickt den Timecode im Bildtakt (etwa 16 kB/s)'
+    : 'Das Deck schickt den Timecode laufend statt nur bei der Kontrollabfrage';
   setSwitch('backup_enabled', d.backup_enabled);
   setSwitch('backup_block_format', d.backup_block_format);
   $('autoRecHint').textContent = d.timer_enabled

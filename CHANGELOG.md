@@ -37,8 +37,11 @@ PATCH bei Fehlerbehebungen.
 
 ### Neu
 - **Tacho im Ereignis-Log:** während langer Übertragungen alle 30 Sekunden
-  eine Zeile mit Prozent, übertragener Menge, Geschwindigkeit und Restzeit,
-  dazu je Datei eine Abschlusszeile mit Dauer und Schnitt.
+  eine Zeile mit Prozent, übertragener Menge, Geschwindigkeit und Restzeit –
+  **für die Datei und für den gesamten Lauf** –, dazu je Datei eine
+  Abschlusszeile mit Dauer und Schnitt. Die Restzeit steht auch im
+  Statusblock der Oberfläche und beruht auf einer geglätteten
+  Geschwindigkeit, damit sie nicht springt.
 - **FTP-Dialog im Log:** Geht etwas schief, stehen die letzten Zeilen des
   tatsächlichen FTP-Gesprächs im Log – Fehlersuche ohne Raten.
 - **Abfrageintervall ab 1 Sekunde** einstellbar (vorher 5). Der Kartenstatus

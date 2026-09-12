@@ -42,6 +42,7 @@ STABLE_S = 20               # so lange muss eine Datei unveraendert bleiben
 FTP_TIMEOUT = 30            # Sekunden fuer Verbindungsaufbau und Befehle
 TRACE_MAX = 80              # so viele Zeilen FTP-Dialog werden mitgeschnitten
 LOG_PROGRESS_S = 30         # Abstand der Tacho-Zeilen im Log
+SPEED_SMOOTH = 0.25         # Glaettung der Geschwindigkeit (0 = traege, 1 = zappelig)
 PROBE_NAME = "_hyperdeck_schreibtest.tmp"
 PART_SUFFIX = ".part"
 SLOT_FOLDER_RE = re.compile(r"(\d)$")
@@ -99,6 +100,14 @@ def duration_text(seconds):
     return "%d:%02d h" % (seconds // 3600, (seconds % 3600) // 60)
 
 
+def eta_text(done, total, speed):
+    """"noch etwa 3:09 min" - oder leer, wenn sich nichts schaetzen laesst."""
+    if not (speed > 0) or not total or total <= done:
+        return ""
+    seconds = (total - done) / speed
+    return "gleich fertig" if seconds < 1 else "noch etwa %s" % duration_text(seconds)
+
+
 def progress_text(done, total, speed):
     """Tachozeile: 42 % (128,0 MB von 305,0 MB) - 24,6 MB/s - noch etwa 7 s"""
     parts = []
@@ -108,8 +117,9 @@ def progress_text(done, total, speed):
         parts.append(human_size(done))
     if speed > 0:
         parts.append("%s/s" % human_size(speed))
-        if total and total > done:
-            parts.append("noch etwa %s" % duration_text((total - done) / speed))
+    rest = eta_text(done, total, speed)
+    if rest:
+        parts.append(rest)
     return " - ".join(parts)
 
 
@@ -888,6 +898,11 @@ class Mirror(object):
         writer = sink.begin_write(rel)
         started = time.monotonic()
         tick = {"done": 0, "at": started, "bytes": 0, "logged": started, "speed": 0.0}
+        with self._lock:                       # Stand des gesamten Laufs
+            before = self.state["bytes_done"]
+            total_all = self.state["bytes_total"]
+            number = self.state["files_done"] + 1
+            count = self.state["files_total"]
 
         def block(data):
             if self._cancel.is_set():
@@ -897,13 +912,22 @@ class Mirror(object):
             now = time.monotonic()
             if now - tick["at"] < 0.5:
                 return
-            tick["speed"] = (tick["done"] - tick["bytes"]) / (now - tick["at"])
+            instant = (tick["done"] - tick["bytes"]) / (now - tick["at"])
+            # Gleitender Durchschnitt - eine zappelnde Restzeit hilft niemandem.
+            tick["speed"] = (instant if not tick["speed"]
+                             else tick["speed"] + SPEED_SMOOTH * (instant - tick["speed"]))
             tick["at"], tick["bytes"] = now, tick["done"]
             self._set(current_done=tick["done"], speed=tick["speed"])
             if now - tick["logged"] >= LOG_PROGRESS_S:
                 tick["logged"] = now
-                self.log("Sicherung: %s %s" % (info.path, progress_text(
-                    tick["done"], info.size, tick["speed"])))
+                line = "Sicherung %d/%d: %s %s" % (
+                    number, count, info.path,
+                    progress_text(tick["done"], info.size, tick["speed"]))
+                rest = eta_text(before + tick["done"], total_all, tick["speed"])
+                if rest and count > 1:
+                    line += " | gesamt %s von %s, %s" % (
+                        human_size(before + tick["done"]), human_size(total_all), rest)
+                self.log(line)
 
         try:
             source.retrieve(folder, info.name, block, CHUNK)
@@ -920,6 +944,11 @@ class Mirror(object):
         finally:
             self._set(current_done=tick["done"])
         took = max(0.001, time.monotonic() - started)
-        self.log("Sicherung: %s fertig - %s in %s (%s/s)" % (
-            info.path, human_size(info.size), duration_text(took),
-            human_size(info.size / took)))
+        line = "Sicherung %d/%d: %s fertig - %s in %s (%s/s)" % (
+            number, count, info.path, human_size(info.size), duration_text(took),
+            human_size(info.size / took))
+        rest = eta_text(before + info.size, total_all, info.size / took)
+        if rest and number < count:
+            line += " | gesamt %s von %s, %s" % (
+                human_size(before + info.size), human_size(total_all), rest)
+        self.log(line)

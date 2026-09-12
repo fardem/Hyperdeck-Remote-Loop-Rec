@@ -340,9 +340,21 @@ Der Fortschritt steht **auch im Ereignis-Log**: während langer Übertragungen
 alle 30 Sekunden eine Tachozeile, dazu je Datei eine Abschlusszeile.
 
 ```text
-Sicherung: sd1/HyperDeck_0003.mov 42 % (12,6 GB von 30,0 GB) - 28,4 MB/s - noch etwa 10:14 min
-Sicherung: sd1/HyperDeck_0003.mov fertig - 30,0 GB in 18:02 min (28,4 MB/s)
+Sicherung 3/5: sd1/HyperDeck_0003.mov 42 % (12,6 GB von 30,0 GB) - 28,4 MB/s - noch etwa 10:14 min | gesamt 41,2 GB von 96,0 GB, noch etwa 32:06 min
+Sicherung 3/5: sd1/HyperDeck_0003.mov fertig - 30,0 GB in 18:02 min (28,4 MB/s) | gesamt 58,6 GB von 96,0 GB, noch etwa 21:52 min
 ```
+
+Die Restzeit gibt es zweimal: für die **laufende Datei** und für den **gesamten
+Lauf**. Beides steht auch im Statusblock der Oberfläche. Grundlage ist eine
+geglättete Geschwindigkeit, damit die Schätzung nicht bei jeder Schwankung
+springt.
+
+> 💡 **Wie lange dauert eine volle Karte?** Bei den rund 9 MB/s, die ein
+> HyperDeck Studio Mini über FTP liefert, braucht eine 64-GB-Karte gut **zwei
+> Stunden**. Deshalb lieber laufend im Intervall sichern als einmal am Ende.
+> Wichtig für den Dauerbetrieb: Die Sicherung muss schneller sein als die
+> Aufnahme. 9 MB/s entsprechen 32 GB/h – das reicht für H.264/H.265 locker,
+> für ProRes HQ (~97 GB/h) nicht.
 
 ### Hinweise für den Betrieb
 

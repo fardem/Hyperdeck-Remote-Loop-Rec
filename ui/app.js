@@ -20,10 +20,17 @@ function fmtBytes(n){
 function fmtDur(sec){
   sec = Math.max(0, Math.round(Number(sec) || 0));
   if (sec < 60) return sec + ' s';
-  var m = Math.floor(sec / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
-  if (d >= 1) return d + ' Tag' + (d === 1 ? '' : 'en') + ' ' + (h % 24) + ' h';
-  if (h >= 1) return h + ' h ' + (m % 60) + ' min';
-  return m + ' min';
+  var two = function(n){ return (n < 10 ? '0' : '') + n; };
+  if (sec < 3600) return Math.floor(sec / 60) + ':' + two(sec % 60) + ' min';
+  var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  if (h < 24) return h + ':' + two(m) + ' h';
+  var d = Math.floor(h / 24);
+  return d + ' Tag' + (d === 1 ? '' : 'en') + ' ' + (h % 24) + ' h';
+}
+
+function etaText(done, total, speed){
+  if (!(speed > 0) || !total || total <= done) return '';
+  return 'noch etwa ' + fmtDur((total - done) / speed);
 }
 
 function setHint(id, text, resetAfter){
@@ -333,14 +340,18 @@ function renderBackup(d){
   var running = !!b.running;
   var done = (Number(b.bytes_done) || 0) + (running ? (Number(b.current_done) || 0) : 0);
   $('bkPhase').textContent = b.phase || 'Bereit';
+  var totalEta = etaText(done, b.bytes_total, b.speed);
   $('bkDetail').textContent = (running && b.files_total)
-    ? (b.files_done + ' von ' + b.files_total + ' Dateien · ' + fmtBytes(done) + ' / ' + fmtBytes(b.bytes_total))
+    ? (b.files_done + ' von ' + b.files_total + ' Dateien · ' + fmtBytes(done) + ' / ' +
+       fmtBytes(b.bytes_total) + (totalEta ? ' · ' + totalEta : ''))
     : '';
   var pct = (running && b.bytes_total) ? Math.min(100, Math.round(done / b.bytes_total * 100)) : 0;
   $('bkBar').style.width = pct + '%';
   $('bkBar').parentNode.hidden = !running;
   $('bkFile').textContent = running && b.current ? b.current : '';
-  $('bkSpeed').textContent = running && b.speed ? fmtBytes(b.speed) + '/s' : '';
+  var fileEta = etaText(b.current_done, b.current_size, b.speed);
+  $('bkSpeed').textContent = running && b.speed
+    ? fmtBytes(b.speed) + '/s' + (fileEta ? ' · Datei ' + fileEta : '') : '';
   $('bkCancel').hidden = !running;
   $('bkStatus').className = 'bk-status' + (running ? ' run' : '') + (b.error ? ' err' : '');
 

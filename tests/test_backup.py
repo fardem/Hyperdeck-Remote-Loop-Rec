@@ -315,6 +315,58 @@ def test_hyperdeck_quirks():
         shutil.rmtree(work, ignore_errors=True)
 
 
+def test_eta_in_log():
+    """Tacho- und Abschlusszeilen muessen Restzeit fuer die Datei UND fuer den
+    gesamten Lauf enthalten - sonst weiss niemand, wie lange es noch dauert."""
+    if not HAVE_FTPD:
+        return
+    from fake_deck_ftp import make_server
+    work = tempfile.mkdtemp(prefix="hdeta_")
+    stable, progress, chunk = hb.STABLE_S, hb.LOG_PROGRESS_S, hb.CHUNK
+    begin_write = hb.LocalSink.begin_write
+    try:
+        hb.STABLE_S, hb.LOG_PROGRESS_S, hb.CHUNK = 1, 0.6, 32 * 1024
+        os.makedirs(os.path.join(work, "2"))
+        for index, mb in enumerate((4, 6, 10)):
+            write_file(os.path.join(work, "2", "HyperDeck_%04d.mp4" % index), mb * 1024 * 1024)
+        server, port = make_server(work)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+
+        def slow(self, rel):                 # Uebertragung bremsen, sonst misst niemand etwas
+            writer = begin_write(self, rel)
+            inner = writer.write
+            writer.write = lambda data: (time.sleep(0.012), inner(data))[1]
+            return writer
+        hb.LocalSink.begin_write = slow
+
+        lines = []
+        cfg = {
+            "deck_ip": "127.0.0.1", "deck_ftp_port": port, "deck_ftp_user": "", "deck_ftp_pass": "",
+            "backup_enabled": False, "backup_interval": 15, "backup_mode": "folder",
+            "backup_folder": os.path.join(work, "ziel"), "backup_source_path": "/",
+            "backup_block_format": True, "backup_ftp_host": "", "backup_ftp_port": 21,
+            "backup_ftp_user": "", "backup_ftp_pass": "", "backup_ftp_path": "/",
+        }
+        hb.Mirror(lambda: dict(cfg), lambda m, level="info": lines.append(str(m)))._run_pass(
+            cfg, reason="Test")
+        server.close_all()
+
+        ticks = [l for l in lines if "%" in l]
+        done = [l for l in lines if "fertig -" in l]
+        assert ticks, lines
+        assert all(l.startswith("Sicherung ") and "/3:" in l for l in ticks), ticks
+        assert all("MB/s" in l for l in ticks), ticks
+        assert any("noch etwa" in l and "gesamt" in l for l in ticks), ticks
+        assert len(done) == 3, done
+        assert any("gesamt" in l and "noch etwa" in l for l in done[:2]), done
+        assert "gesamt" not in done[-1], "die letzte Datei braucht keine Gesamtrestzeit"
+        assert "noch etwa unter" not in " ".join(lines), "unschoene Formulierung"
+    finally:
+        hb.STABLE_S, hb.LOG_PROGRESS_S, hb.CHUNK = stable, progress, chunk
+        hb.LocalSink.begin_write = begin_write
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def test_progress_text():
     assert hb.duration_text(45) == "45 s"
     assert hb.duration_text(90) == "1:30 min"
@@ -322,6 +374,9 @@ def test_progress_text():
     text = hb.progress_text(50 * 1024 * 1024, 100 * 1024 * 1024, 10 * 1024 * 1024)
     assert text.startswith("50 % (50,0 MB von 100,0 MB)"), text
     assert "10,0 MB/s" in text and "noch etwa 5 s" in text, text
+    assert hb.eta_text(0, 500, 1000) == "gleich fertig"      # eine halbe Sekunde
+    assert hb.eta_text(90, 100, 0) == "" and hb.eta_text(100, 100, 10) == ""
+    assert hb.eta_text(0, 64 * 1024**3, 8.8 * 1024**2) == "noch etwa 2:04 h"
     assert hb.parse_mdtm("20260912090013") == datetime.datetime(2026, 9, 12, 9, 0, 13)
     assert hb.parse_mdtm("Unsinn") is None
 
@@ -331,6 +386,7 @@ if __name__ == "__main__":
     test_names();            print("ok  Namensbildung")
     if HAVE_FTPD:
         test_hyperdeck_quirks(); print("ok  HyperDeck-Eigenheiten")
+        test_eta_in_log();       print("ok  Restzeit im Log")
         run_server_tests();      print("ok  Servertests")
     else:
         print("!!  pyftpdlib fehlt - Servertests uebersprungen")

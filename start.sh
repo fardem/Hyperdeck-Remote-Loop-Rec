@@ -13,8 +13,12 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
+if [ ! -f ui/index.html ] || [ ! -f hyperdeck_backup.py ]; then
+  echo "[FEHLER] Programmordner unvollstaendig (ui/ oder hyperdeck_backup.py fehlt)."
+  exit 1
+fi
 echo "[1/3] Python gefunden: $("$PY" --version 2>&1)"
-echo "[2/3] Abhaengigkeiten pruefen (flask) ..."
+echo "[2/3] Abhaengigkeiten pruefen (flask, waitress) ..."
 "$PY" -m pip install -r requirements.txt --disable-pip-version-check || \
   echo "[WARNUNG] Installation fehlgeschlagen - Start wird trotzdem versucht."
 

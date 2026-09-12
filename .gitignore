@@ -6,3 +6,10 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Logdatei des Dienstes
+hyperdeck.log*
+hyperdeck_config.json.tmp
+
+# Tests
+.pytest_cache/

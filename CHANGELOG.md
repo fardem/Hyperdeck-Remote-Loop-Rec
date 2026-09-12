@@ -13,6 +13,35 @@ PATCH bei Fehlerbehebungen.
 
 ---
 
+## [3.4.0] – 2026-09-12
+
+### Neu
+- **Auto-Chunk: Aufnahme in Abschnitte teilen.** Eine laufende Aufnahme ist
+  eine offene Datei und kann nicht gesichert werden. Das neue Feld
+  **„Aufnahme stückeln alle (HH:MM)"** schließt sie in festem Abstand
+  (`00:01` bis `99:59`, `00:00` = aus).
+
+  Der Regelfall ist **nahtlos**: `record: spill: slot id: {n}` mit der eigenen
+  Slot-Nummer. Laut Protokoll wechselt das Deck damit die Datei, **ohne die
+  Aufnahme zu unterbrechen** – keine Lücke. Kann ein Gerät das nicht, schaltet
+  sich die Stückelung ab und sagt es im Log, statt heimlich zu stoppen. Wer
+  die Lücke in Kauf nimmt, stellt die Betriebsart auf „Stopp und neu starten".
+
+### Geändert
+- **`513 display timecode` ist jetzt ein bekannter Code.** Am HyperDeck Studio
+  Mini bestätigt: Er schickt seine Timecode-Meldungen unter diesem im Protokoll
+  nicht dokumentierten Code, mit nur diesem einen Feld. Er wird nicht mehr als
+  „unbekannt" gemeldet – die Behandlung fremder Codes bleibt für andere Modelle
+  bestehen.
+
+### Dokumentation
+- README beantwortet, **von welcher Karte** geholt wird: von beiden, gezielt
+  über den jeweiligen FTP-Ordner. Welche Karte das Deck beschreibt, spielt
+  dafür keine Rolle. Dazu der Hinweis, dass das Protokolldokument zu FTP
+  nichts sagt – das steht im Gerätehandbuch.
+
+---
+
 ## [3.3.2] – 2026-09-12
 
 ### Behoben

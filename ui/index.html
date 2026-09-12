@@ -143,6 +143,7 @@
     </div>
     <div class="hint multi" id="bkLast"></div>
     <div class="hint" id="bkTree"></div>
+    <div class="hint" id="chunkInfo"></div>
 
     <div class="buttons" style="margin-top:12px">
       <button onclick="send('backup')">Jetzt sichern</button>
@@ -157,6 +158,23 @@
           <option value="folder">Ordner oder Netzlaufwerk</option>
           <option value="ftp">FTP-Server (NAS)</option>
         </select>
+      </div>
+      <div class="field">
+        <label for="f_chunk_interval">Aufnahme stückeln alle (HH:MM)</label>
+        <input id="f_chunk_interval" data-key="chunk_interval" type="text"
+               inputmode="numeric" placeholder="00:00 = aus" maxlength="5">
+        <span class="tip">Teilt die laufende Aufnahme in Abschnitte, damit die
+          Dateien regelmäßig fertig werden und abgeholt werden können.
+          <code>00:01</code> = jede Minute, <code>99:59</code> = alle 99 Std. 59 Min.</span>
+      </div>
+      <div class="field">
+        <label for="f_chunk_mode">Wie gestückelt wird</label>
+        <select id="f_chunk_mode" data-key="chunk_mode">
+          <option value="spill">Nahtlos – ohne Unterbrechung</option>
+          <option value="restart">Stopp und neu starten – kurze Lücke</option>
+        </select>
+        <span class="tip">Nahtlos benutzt <code>record spill</code>: Das Deck
+          schließt die Datei und schreibt ohne Pause weiter.</span>
       </div>
       <div class="field">
         <label for="f_backup_interval">Nachsehen alle … Minuten</label>

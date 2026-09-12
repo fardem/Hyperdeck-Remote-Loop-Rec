@@ -63,7 +63,7 @@ except ImportError:
 # Konfiguration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "3.3.2"       # wird in der Web-Oberflaeche und im Log angezeigt
+APP_VERSION = "3.4.0"       # wird in der Web-Oberflaeche und im Log angezeigt
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # Ablage fuer Konfiguration und Logdatei. Ueber die Umgebungsvariable
 # HYPERDECK_HOME laesst sich ein anderer Ordner waehlen - z. B. fuer eine
@@ -94,6 +94,8 @@ DEFAULT_SETTINGS = {
     "auto_loop": True,
     "sync_timecode": True,          # Timecode beim Start auf Uhrzeit setzen
     "timecode_live": True,          # Deck schickt den Timecode laufend mit
+    "chunk_interval": 0,            # Aufnahme stueckeln alle n Minuten (0 = aus)
+    "chunk_mode": "spill",          # "spill" = nahtlos, "restart" = mit Luecke
     "format_filesystem": "exFAT",   # exFAT oder HFS+
     "format_name": "LoopDump",
     "timer_enabled": False,         # Zeitgesteuerte Aufnahme (Timer-Recording)
@@ -120,6 +122,7 @@ SECRET_KEYS = ("deck_ftp_pass", "backup_ftp_pass")
 SETTING_CHOICES = {
     "format_filesystem": ("exFAT", "HFS+"),
     "backup_mode": ("folder", "ftp"),
+    "chunk_mode": ("spill", "restart"),
 }
 
 SETTING_TYPES = {
@@ -133,6 +136,8 @@ SETTING_TYPES = {
     "auto_loop": bool,
     "sync_timecode": bool,
     "timecode_live": bool,
+    "chunk_interval": int,
+    "chunk_mode": str,
     "format_filesystem": str,
     "format_name": str,
     "timer_enabled": bool,
@@ -160,6 +165,7 @@ LIMITS = {
     "min_remaining_threshold": (1, 240),
     "inactive_min_free": (1, 2000),
     "timer_count": (1, TIMER_SLOTS),
+    "chunk_interval": (0, 99 * 60 + 59),
     "deck_ftp_port": (1, 65535),
     "backup_interval": (1, 1440),
     "backup_ftp_port": (1, 65535),
@@ -170,6 +176,8 @@ LIMITS = {
 ASYNC_CONNECTION = 500      # 500 connection info  (Begruessung)
 ASYNC_SLOT = 502            # 502 slot info        (Karte gewechselt, Restzeit)
 ASYNC_TRANSPORT = 508       # 508 transport info   (Aufnahme laeuft/steht)
+ASYNC_DISPLAY_TC = 513      # 513 display timecode (am Studio Mini beobachtet,
+                            #                       im Protokoll nicht genannt)
 
 FORMAT_COOLDOWN_S = 180     # Sperre pro Slot nach einer Formatierung
 SLOT_POLL_MIN_S = 5         # Kartenstatus hoechstens so oft abfragen
@@ -227,6 +235,7 @@ STATE = {
     "timer_info": "Timer aus",  # Klartext fuer die Oberflaeche
     "notify": False,            # Deck meldet Aenderungen von selbst
     "timecode_stream": False,   # Timecode kommt laufend statt nur bei Abfragen
+    "chunk_info": "",           # Klartext zum naechsten Abschnittswechsel
 }
 _state_lock = threading.RLock()
 
@@ -318,6 +327,19 @@ def hhmm_to_minutes(value):
     return int(hour) * 60 + int(minute)
 
 
+def duration_to_minutes(text):
+    """"01:30" -> 90. Anders als eine Uhrzeit darf die Stundenzahl bis 99 gehen."""
+    match = re.match(r"^\s*(\d{1,2})\s*:\s*(\d{1,2})\s*$", str(text))
+    if match is None:
+        raise ValueError("Dauer erwartet als HH:MM, nicht %r" % text)
+    return int(match.group(1)) * 60 + min(59, int(match.group(2)))
+
+
+def minutes_to_duration(minutes):
+    minutes = max(0, int(minutes))
+    return "%02d:%02d" % (minutes // 60, minutes % 60)
+
+
 def normalize_days(raw, fallback):
     """Akzeptiert [0,1,2], "0,1,2" oder "Mo,Di" und liefert eine sortierte Liste."""
     if isinstance(raw, (list, tuple)):
@@ -374,7 +396,9 @@ def _coerce(key, value):
     if kind is bool:
         return _to_bool(value)
     if kind is int:
-        value = int(float(str(value).strip()))   # vertraegt auch "20" und "20.0"
+        text = str(value).strip()
+        # Dauern duerfen als HH:MM kommen (Auto-Chunk), alles andere als Zahl.
+        value = duration_to_minutes(text) if ":" in text else int(float(text))
         lo, hi = LIMITS.get(key, (None, None))
         if lo is not None:
             value = max(lo, min(hi, value))
@@ -623,6 +647,7 @@ _last_automation = [0.0]
 _async_unknown = set()      # Codes, ueber die schon einmal berichtet wurde
 _last_timecode_msg = [0.0]  # wann zuletzt ein Timecode unaufgefordert kam
 TIMECODE_STREAM_IDLE_S = 5  # so lange gilt der Strom noch als lebendig
+CHUNK_RETRY_S = 30          # Wiederholabstand, wenn ein Abschnittswechsel misslang
 _format_name_supported = {"value": True}
 
 
@@ -685,6 +710,7 @@ def do_record(manual=False):
     reply = deck.command("record", timeout=10.0)
     if reply.ok:
         set_state(manual_stop=False)
+        chunk_reset()               # der Abschnitt beginnt mit der Aufnahme
         _last_autorecord_error["text"] = ""
         log("Aufnahme gestartet (%s)." % ("manuell" if manual else "Auto-Record"), "ok")
         read_transport()
@@ -695,6 +721,79 @@ def do_record(manual=False):
         _last_autorecord_error["text"] = text
         log(text, "err")
     return False
+
+
+_chunk_state = {"started": 0.0, "next_try": 0.0}
+
+
+def chunk_reset(reason=""):
+    """Beginnt die Abschnittsmessung neu - nach jedem Aufnahmestart und nach
+    jedem gelungenen Wechsel."""
+    _chunk_state["started"] = time.monotonic()
+    _chunk_state["next_try"] = 0.0
+    if reason:
+        set_state(chunk_info=reason)
+
+
+def do_chunk():
+    """Schliesst die laufende Datei und schreibt weiter.
+
+    Der saubere Weg ist "record: spill: slot id: {n}" mit der eigenen
+    Slot-Nummer: Laut Protokoll wechselt das Deck damit die Datei, ohne die
+    Aufnahme zu unterbrechen. Nur wenn das Geraet das nicht kann und der
+    Benutzer eine Luecke ausdruecklich in Kauf nimmt, wird gestoppt und neu
+    gestartet."""
+    cfg = get_settings()
+    with _state_lock:
+        active = STATE["active_slot"]
+        recording = is_recording(STATE["status"])
+    if not recording:
+        return False
+
+    if cfg["chunk_mode"] == "spill":
+        command = ("record: spill: slot id: %d" % active) if active in (1, 2) else "record spill"
+        reply = deck.command(command, timeout=10.0)
+        if reply.ok:
+            log("Neuer Aufnahmeabschnitt begonnen (nahtlos, ohne Unterbrechung).", "ok")
+            chunk_reset()
+            read_transport()
+            return True
+        log("Deck kann 'record spill' nicht (%s%s) - Auto-Chunk wird abgeschaltet. "
+            "Wer eine kurze Luecke in Kauf nimmt, stellt die Betriebsart auf "
+            "'Stopp und neu starten'." % (reply, reply.hint()), "err")
+        update_settings({"chunk_interval": 0})
+        return False
+
+    # Ausdruecklich gewuenscht: mit kurzer Unterbrechung
+    log("Neuer Aufnahmeabschnitt: Aufnahme wird kurz gestoppt und neu gestartet.", "warn")
+    deck.command("stop", timeout=10.0)
+    started = do_record(manual=False)
+    chunk_reset()
+    return started
+
+
+def run_chunker():
+    """Wird vom Worker haeufig aufgerufen und teilt die laufende Aufnahme."""
+    cfg = get_settings()
+    minutes = cfg["chunk_interval"]
+    with _state_lock:
+        recording = is_recording(STATE["status"])
+    if not minutes or not recording:
+        if STATE["chunk_info"]:
+            set_state(chunk_info="")
+        _chunk_state["started"] = time.monotonic()
+        return
+
+    now = time.monotonic()
+    if not _chunk_state["started"]:
+        _chunk_state["started"] = now
+    due = _chunk_state["started"] + minutes * 60
+    remaining = int(max(0, due - now))
+    set_state(chunk_info="Nächster Abschnitt in %d:%02d min" % (remaining // 60, remaining % 60))
+    if now < due or now < _chunk_state["next_try"]:
+        return
+    _chunk_state["next_try"] = now + CHUNK_RETRY_S
+    do_chunk()
 
 
 def do_stop(manual=False):
@@ -858,6 +957,8 @@ def handle_async(reply):
         info = apply_slot(reply.data)
         if info is not None:
             _async_seen["slot"] = True
+    elif reply.code == ASYNC_DISPLAY_TC:
+        apply_transport(reply.data)             # enthaelt nur den Timecode
     elif reply.code == ASYNC_CONNECTION:
         pass                                    # Begruessung, schon verarbeitet
     else:
@@ -1252,6 +1353,7 @@ def worker_loop():
             # eingestellte Uhrzeit sekundengenau trifft.
             if deck.connected:
                 run_timer()
+                run_chunker()
 
             remaining = interval - (time.monotonic() - last_poll)
             # Der Strom gilt nur als lebendig, wenn wirklich etwas ankommt -

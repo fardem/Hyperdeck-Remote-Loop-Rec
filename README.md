@@ -285,7 +285,7 @@ dort in ein Ziel deiner Wahl:
 
 | Ziel | Einstellung | Beispiel |
 | --- | --- | --- |
-| **Ordner / Netzlaufwerk** | Zielordner | `Z:\HyperDeck` oder `\\NAS\Aufnahmen\Deck1` (UNC) |
+| **Ordner** (lokal oder Netzlaufwerk) | Zielordner | `D:\Aufnahmen`, `Z:\HyperDeck` oder `\\NAS\Aufnahmen\Deck1` (UNC) |
 | **FTP-Server** | Server, Port, Benutzer, Passwort, Ordner | NAS mit FTP-Dienst, `/Aufnahmen/Deck1` |
 
 ### So läuft ein Sicherungslauf ab

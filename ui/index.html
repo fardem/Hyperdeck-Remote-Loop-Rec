@@ -144,7 +144,7 @@
       <div class="field">
         <label for="f_backup_mode">Ziel</label>
         <select id="f_backup_mode" data-key="backup_mode" onchange="updateBackupMode()">
-          <option value="folder">Ordner / Netzlaufwerk</option>
+          <option value="folder">Ordner (lokal / Netzlaufwerk)</option>
           <option value="ftp">FTP-Server</option>
         </select>
       </div>
@@ -153,8 +153,8 @@
         <input id="f_backup_interval" data-key="backup_interval" type="number" min="1" max="1440">
       </div>
       <div class="field wide" id="bkFolderWrap">
-        <label for="f_backup_folder">Zielordner (auch UNC-Pfad)</label>
-        <input id="f_backup_folder" data-key="backup_folder" type="text" placeholder="Z:\HyperDeck  oder  \\NAS\Aufnahmen\Deck1">
+        <label for="f_backup_folder">Zielordner - lokal, Netzlaufwerk oder UNC-Pfad</label>
+        <input id="f_backup_folder" data-key="backup_folder" type="text" placeholder="D:\Aufnahmen  ·  Z:\HyperDeck  ·  \\NAS\Aufnahmen\Deck1">
       </div>
       <div class="field wide" id="bkFtpWrap" hidden>
         <div class="fields">

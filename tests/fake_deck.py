@@ -25,6 +25,8 @@ class FakeDeck(object):
         self.slots = {1: {"status": "mounted", "volume": "TestCard", "recording time": 3600},
                       2: {"status": "mounted", "volume": "TestCard2", "recording time": 3600}}
         self.active = 1
+        self.frame = 0                      # zaehlt den Timecode hoch
+        self.tc_rate = 0.04                 # 25 Bilder je Sekunde
         self.log = []
         self.clients = []
         self.lock = threading.Lock()
@@ -32,11 +34,35 @@ class FakeDeck(object):
 
     # ---- Antwortbausteine -------------------------------------------------
 
+    def timecode(self):
+        total = self.frame
+        return "%02d:%02d:%02d:%02d" % (10 + total // (25 * 3600),
+                                        (total // (25 * 60)) % 60,
+                                        (total // 25) % 60, total % 25)
+
     def transport_block(self, code=208):
-        return ("%d transport info:%s"
-                "status: %s%sslot id: %d%stimecode: 10:00:00:00%sdisplay timecode: "
-                "10:00:00:00%s%s" % (code, CRLF, self.status, CRLF, self.active, CRLF,
-                                     CRLF, CRLF, CRLF))
+        """Vollstaendiger Block wie im Protokoll - damit Messungen der
+        Netzlast auch etwas taugen."""
+        tc = self.timecode()
+        fields = [
+            ("status", self.status),
+            ("speed", "0"),
+            ("slot id", str(self.active)),
+            ("slot name", self.slots[self.active]["volume"]),
+            ("device name", "HyperDeck Studio Mini"),
+            ("clip id", "3"),
+            ("single clip", "false"),
+            ("display timecode", tc),
+            ("timecode", tc),
+            ("video format", "1080p25"),
+            ("loop", "false"),
+            ("timeline", "1"),
+            ("input video format", "1080p25"),
+            ("dynamic range", "none"),
+            ("reference locked", "false"),
+        ]
+        body = "".join("%s: %s%s" % (key, value, CRLF) for key, value in fields)
+        return "%d transport info:%s%s%s" % (code, CRLF, body, CRLF)
 
     def slot_block(self, slot_id, code=202):
         slot = self.slots[slot_id]
@@ -52,7 +78,7 @@ class FakeDeck(object):
         with self.lock:
             targets = list(self.clients)
         for conn, wants in targets:
-            if not wants.get(what):
+            if not wants.get(what if what != "timecode" else "display timecode"):
                 continue
             text = (self.transport_block(508) if what == "transport"
                     else self.slot_block(slot_id or self.active, 502))
@@ -72,6 +98,20 @@ class FakeDeck(object):
 
     # ---- Verbindungen -----------------------------------------------------
 
+    def _timecode_ticker(self):
+        """Schickt den Transportblock im Bildtakt - so wie ein echtes Deck mit
+        'notify: display timecode: true'."""
+        while True:
+            time.sleep(self.tc_rate)
+            self.frame += 1
+            with self.lock:
+                listeners = [(c, w) for c, w in self.clients if w.get("display timecode")]
+            for conn, _wants in listeners:
+                try:
+                    conn.sendall(self.transport_block(508).encode("utf-8"))
+                except OSError:
+                    pass
+
     def serve(self):
         self.server = socket.socket()
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -79,6 +119,7 @@ class FakeDeck(object):
         self.server.listen(5)
         self.port = self.server.getsockname()[1]
         threading.Thread(target=self._accept, daemon=True).start()
+        threading.Thread(target=self._timecode_ticker, daemon=True).start()
         return self.port
 
     def _accept(self):
@@ -96,7 +137,7 @@ class FakeDeck(object):
             pass
 
     def _client(self, conn):
-        wants = {"transport": False, "slot": False}
+        wants = {"transport": False, "slot": False, "display timecode": False}
         with self.lock:
             self.clients.append((conn, wants))
         conn.sendall(("500 connection info:%sprotocol version: 1.11%smodel: %s%s%s"
@@ -134,7 +175,7 @@ class FakeDeck(object):
             slot_id = 2 if "slot id: 2" in low else 1
             send(self.slot_block(slot_id))
         elif low.startswith("notify:"):
-            for key in ("transport", "slot"):
+            for key in ("transport", "slot", "display timecode"):
                 if "%s: true" % key in low:
                     wants[key] = True
                 elif "%s: false" % key in low:

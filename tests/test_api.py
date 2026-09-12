@@ -108,6 +108,33 @@ def test_notifications_beat_polling():
         assert "meldet Aenderungen ab jetzt von selbst" in log, log[-400:]
 
 
+def test_timecode_streams_without_polling():
+    """Mit "notify: display timecode" laeuft die Zeitanzeige weiter, auch wenn
+    praktisch nie abgefragt wird - und das Log wird davon nicht geflutet."""
+    with Stack(interval=3600) as s:                 # Kontrollabfrage faktisch aus
+        assert wait_for(lambda: s.get("/api/status")["timecode_stream"] is True), \
+            "Timecode-Strom nicht aktiv"
+        assert wait_for(lambda: s.get("/api/status")["status"].startswith("record"))
+        first = s.get("/api/status")["timecode"]
+        time.sleep(2.0)
+        second = s.get("/api/status")["timecode"]
+        assert first != second, "Timecode muss ohne Abfrage weiterlaufen (%s)" % first
+        assert second > first, (first, second)
+
+        # Pro Bild eine Meldung darf weder das Log noch die Automatik beschaeftigen.
+        text = s.text("/api/log.txt")
+        assert text.count("Deck meldet:") <= 2, text[-600:]
+        assert text.count("Deck steht") <= 1, text[-600:]
+
+        # Abschalten laesst den Strom versiegen, die Anzeige friert ein.
+        s.post("/api/settings", {"timecode_live": False})
+        assert wait_for(lambda: s.get("/api/status")["timecode_stream"] is False)
+        time.sleep(1.5)
+        frozen = s.get("/api/status")["timecode"]
+        time.sleep(1.5)
+        assert s.get("/api/status")["timecode"] == frozen, "Strom haette enden muessen"
+
+
 def test_end_to_end():
     with Stack() as s:
         d = s.get("/api/status")
@@ -182,6 +209,7 @@ def test_end_to_end():
 
 
 if __name__ == "__main__":
-    test_notifications_beat_polling(); print("ok  Meldungen statt Abfragen")
+    test_notifications_beat_polling();      print("ok  Meldungen statt Abfragen")
+    test_timecode_streams_without_polling(); print("ok  Timecode laeuft live")
     test_end_to_end();                 print("ok  Ende-zu-Ende")
     print("Alle API-Tests bestanden.")

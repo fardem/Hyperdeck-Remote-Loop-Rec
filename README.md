@@ -5,7 +5,7 @@ Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Autom
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue?logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/WebUI-Flask-black?logo=flask&logoColor=white)
 ![Hardware](https://img.shields.io/badge/Hardware-BM%20HyperDeck-red)
-![Version](https://img.shields.io/badge/Version-3.2.0-blueviolet)
+![Version](https://img.shields.io/badge/Version-3.3.0-blueviolet)
 ![Tests](https://github.com/fardem/Hyperdeck-Remote-Loop-Rec/actions/workflows/tests.yml/badge.svg)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -94,7 +94,7 @@ Klassische Skripte frieren häufig ein, wenn Web-Anfragen und Überwachungsschle
 └─────────────────────────────────────────────────────────────┘
 
 - **Kein Socket-Konflikt:** Flask redet niemals direkt mit dem Deck, sondern legt Aufträge in eine Queue.
-- **Das Deck meldet sich selbst:** Nach dem Verbinden werden `notify: transport: true` und `notify: slot: true` abonniert. Statusänderungen kommen dann als asynchrone `508`/`502`-Meldungen **sofort** – ohne auf die nächste Abfrage zu warten. Die regelmäßige Abfrage bleibt als Sicherheitsnetz.
+- **Das Deck meldet sich selbst:** Nach dem Verbinden werden `notify: transport: true`, `notify: slot: true` und `notify: display timecode: true` abonniert. Statusänderungen kommen dann als asynchrone `508`/`502`-Meldungen **sofort** – ohne auf die nächste Abfrage zu warten, und der Timecode läuft im Bildtakt mit. Die regelmäßige Abfrage bleibt als Sicherheitsnetz.
 - **Sicherung getrennt:** Die FTP-Spiegelung läuft in einem eigenen Thread mit eigener Verbindung (Port 21). Sie kann die Steuerverbindung weder blockieren noch stören.
 - **Echter Stream-Parser:** Antworten werden nach 3-stelligen Statuscodes (200 ok, 216 format ready) geparst. Unaufgeforderte asynchrone Statusmeldungen (5xx) werden sauber herausgefiltert.
 - **Lokale Timer-Interpolation:** Der Countdown zur nächsten Abfrage zählt im Browser per JavaScript (`Date.now()`) flüssig herunter, ohne das Netzwerk zu belasten.
@@ -215,6 +215,7 @@ Die Weboberfläche ist in funktionale Bereiche gegliedert:
 | **Auto-Record** | Startet die Aufnahme automatisch, sobald das Deck steht. |
 | **Auto-Loop** | Formatiert die inaktive Karte rechtzeitig vor Kartenüberlauf. |
 | **Timecode auf Uhrzeit** | Setzt den Startzeitcode auf die PC-Systemzeit (`HH:MM:SS:00`). Schaltet dazu den **Timecode-Eingang des Decks auf `preset`** – ohne das ignoriert das Deck die Vorgabe und zählt den Timecode aus dem Videosignal weiter. Wer extern (LTC) oder eingebettet einspeist, lässt den Schalter aus. |
+| **Timecode läuft mit** | Abonniert `notify: display timecode`. Das Deck schickt den Transportblock dann bei **jeder** Timecode-Änderung, also im Bildtakt. Ohne diesen Schalter bewegt sich die Anzeige nur im Takt der Kontrollabfrage. |
 | **Timer aktiv** | Schaltet die Zeitsteuerung scharf (siehe nächster Abschnitt). |
 | **Automatisch sichern** | Spiegelt fertige Clips im eingestellten Intervall ins Sicherungsziel. |
 | **Karte erst leeren, wenn gesichert** | Auto-Loop wartet mit dem Formatieren, bis die Clips der Karte gesichert sind. |
@@ -308,6 +309,37 @@ Bei jedem Verdacht auf einen verschobenen Dialog wird die Verbindung deshalb
 weggeworfen und neu aufgebaut. Geht doch etwas schief, steht der komplette
 FTP-Dialog im Ereignis-Log.
 
+### Wann wird welche Karte gesichert?
+
+Es gibt **drei** Auslöser – und keiner davon wartet auf den Kartenwechsel:
+
+| Auslöser | Umfang | Wann |
+| --- | --- | --- |
+| **Automatisch sichern** | beide Karten | alle *n* Minuten, laufend im Betrieb |
+| **Karte erst leeren, wenn gesichert** | nur die zu leerende Karte | unmittelbar bevor Auto-Loop sie formatieren würde |
+| **„Jetzt sichern" / „Karte sichern"** | alles bzw. eine Karte | auf Knopfdruck |
+
+Im Ringbetrieb sieht das so aus:
+
+```text
+Deck nimmt auf Karte A auf
+  └─ Intervall-Lauf sichert: alle FERTIGEN Clips auf A  +  alles auf B
+     (der gerade laufende Clip auf A bleibt liegen – er wächst noch)
+
+Karte A ist voll → Deck schaltet auf B
+  └─ jetzt ist auch A's letzter Clip fertig und wird beim nächsten Lauf geholt
+
+Karte B wird knapp → Auto-Loop will A leeren
+  └─ prüft: sind A's Clips gesichert?
+       ja   → A wird formatiert
+       nein → Sicherungslauf nur für A, Formatieren wird verschoben
+```
+
+**Entscheidend:** Gesichert wird *während* der Aufnahme, nicht erst beim
+Umschalten. Geleert wird immer nur die **inaktive** Karte – und zwischen
+„Umschalten von A auf B" und „A wird geleert" liegt die gesamte Laufzeit von B,
+also Stunden. Puffer ist reichlich.
+
 ### So läuft ein Sicherungslauf ab
 
 1. Die Dateiliste des Decks wird gelesen (`sd1`, `sd2`, … – die Ordnernamen
@@ -377,6 +409,26 @@ springt.
   am Ende“.
 - Bei einem Lauf mit Fehlern (Ziel voll, Netz weg) bleiben die betroffenen
   Clips „offen“ und werden beim nächsten Lauf erneut versucht.
+
+---
+
+### Was kostet der mitlaufende Timecode?
+
+Gemessen mit vollständigem Transportblock (328 Byte je Meldung):
+
+| Bildrate | Meldungen je Sekunde | Netzlast |
+| --- | --- | --- |
+| 25 fps | 25 | **8,2 kB/s** (65 kbit/s) |
+| 50 fps | 49 | **16,0 kB/s** (128 kbit/s) |
+
+Das sind rund **0,13 % einer 100-Mbit-Leitung** – und etwa **0,2 % dessen, was
+eine laufende FTP-Sicherung zieht**. Für ein lokales Netz ist das nichts. Wer
+es trotzdem nicht mag (sehr schwaches WLAN, Deck mit alter Firmware), schaltet
+„Timecode läuft mit" ab; alles andere funktioniert unverändert weiter.
+
+> Nur Zustandswechsel (Aufnahme startet/endet, Karte gewechselt) landen im Log
+> und stoßen die Automatik an – die Meldungen dazwischen aktualisieren still
+> die Anzeige.
 
 ---
 

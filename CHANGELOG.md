@@ -13,6 +13,46 @@ PATCH bei Fehlerbehebungen.
 
 ---
 
+## [3.3.1] – 2026-09-12
+
+### Behoben
+- **Eine nie gesicherte Karte konnte als „gesichert" durchgehen.** Die Prüfung
+  vor dem Formatieren sah nur, *ob* zuletzt ein Lauf ohne offene Dateien
+  stattfand – nicht, *welche* Karte dieser Lauf abgedeckt hatte. Ein gezielter
+  Lauf für Slot 1 ließ damit auch Slot 2 als sauber gelten, und Slot 2 wäre
+  geleert worden, ohne je gesichert worden zu sein. Trifft nur bei
+  eingeschaltetem „Karte erst leeren, wenn gesichert" und ausgeschalteter
+  automatischer Sicherung zu. Der Lauf merkt sich jetzt seinen Umfang.
+
+### Dokumentation
+- README erklärt mit Ablaufbild, **wann welche Karte** gesichert wird und dass
+  laufend während der Aufnahme gesichert wird – nicht erst beim Kartenwechsel.
+
+---
+
+## [3.3.0] – 2026-09-12
+
+### Neu
+- **Der Timecode läuft jetzt live mit.** Bisher wurden nur `transport` und
+  `slot` abonniert – die Zeitanzeige bewegte sich deshalb nur im Takt der
+  Kontrollabfrage. Mit `notify: display timecode: true` schickt das Deck den
+  Transportblock bei jeder Timecode-Änderung, also im Bildtakt.
+  Neuer Schalter **„Timecode läuft mit"**, im laufenden Betrieb umschaltbar.
+
+  Gemessen (voller Transportblock, 328 Byte je Meldung): **8,2 kB/s bei
+  25 fps, 16,0 kB/s bei 50 fps** – rund 0,13 % einer 100-Mbit-Leitung und
+  etwa 0,2 % dessen, was eine laufende FTP-Sicherung zieht.
+
+### Behoben
+- **Kurzmeldungen hätten den Status überschreiben können.** Eine
+  Transport-Meldung ohne `status`-Feld hätte den Zustand auf „unbekannt“
+  gesetzt und damit Auto-Record losgeschickt. Fehlende Felder behalten jetzt
+  ihren bisherigen Wert.
+- Log und Automatik reagieren nur noch auf **echte** Zustandswechsel. Ohne das
+  hätte der Timecode-Strom im Bildtakt beides geflutet.
+
+---
+
 ## [3.2.0] – 2026-09-12
 
 ### Neu

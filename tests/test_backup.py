@@ -188,6 +188,17 @@ def run_server_tests():
     assert first in names and any(r.endswith("_524288.mov") for r in names), names
     assert not any(r.endswith(".part") for r, _ in list_tree(local_target))
 
+    print("-- Ein Lauf fuer einen Slot darf den anderen nicht freigeben")
+    mirror._seen.clear()
+    mirror._run_pass(cfg, scope="sd1", reason="Test")
+    assert mirror.is_clean(60, slot_id=1) is True, "sd1 wurde gerade gesichert"
+    assert mirror.is_clean(60, slot_id=2) is False, \
+        "sd2 war nicht Teil des Laufs und darf nicht als gesichert gelten"
+    assert mirror.is_clean(60) is False, "ein Teil-Lauf sagt nichts ueber das Ganze"
+    mirror._seen.clear()
+    mirror._run_pass(cfg, reason="Test")
+    assert mirror.is_clean(60, slot_id=2) is True, "nach dem vollen Lauf ist sd2 gesichert"
+
     print("-- Nur ein Slot (scope)")
     write_file(os.path.join(deck_dir, "sd1", "HyperDeck_0003.mov"), 100 * 1024)
     write_file(os.path.join(deck_dir, "sd2", "HyperDeck_0002.mov"), 100 * 1024)

@@ -76,7 +76,7 @@
         <span class="track" id="tr_auto_loop"></span>
       </label>
       <label class="sw">
-        <div><div class="t">Timecode auf Uhrzeit</div><div class="d">Setzt den Startzeitcode auf die Systemzeit</div></div>
+        <div><div class="t">Timecode auf Uhrzeit</div><div class="d">Startzeitcode = PC-Uhrzeit (schaltet den Timecode-Eingang auf „preset")</div></div>
         <input type="checkbox" id="sw_sync_timecode" onchange="setFlag('sync_timecode',this.checked)">
         <span class="track" id="tr_sync_timecode"></span>
       </label>
@@ -216,8 +216,8 @@
         <input id="f_deck_port" data-key="deck_port" type="number" min="1" max="65535">
       </div>
       <div class="field">
-        <label for="f_check_interval">Abfrage alle … Sekunden</label>
-        <input id="f_check_interval" data-key="check_interval" type="number" min="5" max="3600">
+        <label for="f_check_interval">Abfrage alle … Sekunden (1–3600)</label>
+        <input id="f_check_interval" data-key="check_interval" type="number" min="1" max="3600">
       </div>
       <div class="field">
         <label for="f_min_remaining_threshold">Vorbereiten ab … Minuten Rest</label>

@@ -13,6 +13,32 @@ PATCH bei Fehlerbehebungen.
 
 ---
 
+## [3.3.2] – 2026-09-12
+
+### Behoben
+- **Der Timecode lief am echten Gerät nicht mit**, obwohl der Schalter an war.
+  Verarbeitet wurden nur die Codes `508` und `502` – schickt ein Deck seine
+  Timecode-Meldung unter einem anderen Code, landete sie im Nichts. Das
+  Protokoll legt diesen Code nicht eindeutig fest. Jetzt wird **jede**
+  unaufgeforderte Meldung ausgewertet, in der ein Timecode steht, und ein
+  unbekannter Code einmal mit Feldliste ins Log geschrieben.
+- **Die Anzeige versprach zu viel.** „Läuft" stand schon dort, wenn das Deck
+  den Wunsch quittiert hatte. Jetzt gilt der Strom nur als lebendig, wenn in
+  den letzten fünf Sekunden tatsächlich Meldungen ankamen – sonst steht
+  „Eingeschaltet, aber das Deck schickt nichts".
+
+### Neu
+- Nach dem Abonnieren fragt das Programm das Deck mit `notify`, was es nun
+  wirklich meldet, und schreibt die Antwort ins Log. Quittiert ein Gerät den
+  Wunsch mit „ok", schaltet ihn aber nicht ein, steht das jetzt ausdrücklich
+  da statt stillschweigend zu scheitern.
+- `tests/test_protocol.py`: fünf Tests für die Meldungsschicht – fremder
+  Antwortcode, Kurzmeldung ohne Status, kein Log-Sturm bei 50 Meldungen je
+  Sekunde, stillschweigende Ablehnung. Das Simulat kann diese Fälle jetzt
+  nachstellen.
+
+---
+
 ## [3.3.1] – 2026-09-12
 
 ### Behoben

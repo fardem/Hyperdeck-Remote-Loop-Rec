@@ -27,6 +27,9 @@ class FakeDeck(object):
         self.active = 1
         self.frame = 0                      # zaehlt den Timecode hoch
         self.tc_rate = 0.04                 # 25 Bilder je Sekunde
+        self.tc_code = 508                  # Code der Timecode-Meldung
+        self.tc_short = False               # nur Timecode statt vollem Block
+        self.accept_tc_notify = True        # False: Wunsch wird nur quittiert
         self.log = []
         self.clients = []
         self.lock = threading.Lock()
@@ -98,17 +101,27 @@ class FakeDeck(object):
 
     # ---- Verbindungen -----------------------------------------------------
 
+    def timecode_message(self):
+        """Voller Transportblock oder nur der Timecode - je nach Einstellung.
+        Echte Geraete unterscheiden sich hier, deshalb beides pruefbar."""
+        if not self.tc_short:
+            return self.transport_block(self.tc_code)
+        return ("%d display timecode:%sdisplay timecode: %s%stimecode: %s%s%s"
+                % (self.tc_code, CRLF, self.timecode(), CRLF, self.timecode(), CRLF, CRLF))
+
     def _timecode_ticker(self):
-        """Schickt den Transportblock im Bildtakt - so wie ein echtes Deck mit
+        """Schickt Timecode-Meldungen im Bildtakt - so wie ein echtes Deck mit
         'notify: display timecode: true'."""
         while True:
             time.sleep(self.tc_rate)
             self.frame += 1
+            if not self.accept_tc_notify:
+                continue
             with self.lock:
                 listeners = [(c, w) for c, w in self.clients if w.get("display timecode")]
             for conn, _wants in listeners:
                 try:
-                    conn.sendall(self.transport_block(508).encode("utf-8"))
+                    conn.sendall(self.timecode_message().encode("utf-8"))
                 except OSError:
                     pass
 
@@ -181,6 +194,15 @@ class FakeDeck(object):
                 elif "%s: false" % key in low:
                     wants[key] = False
             send("200 ok" + CRLF)
+        elif low == "notify":
+            # Auskunft ueber den tatsaechlichen Zustand. Ein Geraet, das
+            # accept_tc_notify=False hat, gibt hier ehrlich "false" zurueck.
+            live = wants["display timecode"] and self.accept_tc_notify
+            send("209 notify:%stransport: %s%sslot: %s%sremote: false%s"
+                 "configuration: false%sdisplay timecode: %s%s%s"
+                 % (CRLF, str(wants["transport"]).lower(), CRLF,
+                    str(wants["slot"]).lower(), CRLF, CRLF, CRLF,
+                    str(live).lower(), CRLF, CRLF))
         elif low == "record":
             self.set_status("record")          # Meldung kommt VOR der Antwort
             send("200 ok" + CRLF)

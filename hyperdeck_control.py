@@ -63,7 +63,7 @@ except ImportError:
 # Konfiguration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "3.3.1"       # wird in der Web-Oberflaeche und im Log angezeigt
+APP_VERSION = "3.3.2"       # wird in der Web-Oberflaeche und im Log angezeigt
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # Ablage fuer Konfiguration und Logdatei. Ueber die Umgebungsvariable
 # HYPERDECK_HOME laesst sich ein anderer Ordner waehlen - z. B. fuer eine
@@ -620,6 +620,9 @@ _autorecord_next_try = [0.0]
 _last_slot_poll = [0.0]
 _async_seen = {"transport": False, "slot": False}
 _last_automation = [0.0]
+_async_unknown = set()      # Codes, ueber die schon einmal berichtet wurde
+_last_timecode_msg = [0.0]  # wann zuletzt ein Timecode unaufgefordert kam
+TIMECODE_STREAM_IDLE_S = 5  # so lange gilt der Strom noch als lebendig
 _format_name_supported = {"value": True}
 
 
@@ -828,12 +831,24 @@ def apply_transport(data):
     return status, active, changed
 
 
+def has_timecode(data):
+    return bool(data.get("display timecode") or data.get("timecode"))
+
+
 def handle_async(reply):
     """Wird vom Leser aufgerufen, wenn das Deck von sich aus etwas meldet.
     Hier wird nur der Zustand nachgezogen - die Automatik laeuft danach in der
-    Worker-Schleife, damit sich kein Befehl in einen anderen verschachtelt."""
+    Worker-Schleife, damit sich kein Befehl in einen anderen verschachtelt.
+
+    Welchen Code ein Geraet fuer Timecode-Meldungen benutzt, legt das Protokoll
+    nicht eindeutig fest. Deshalb wird JEDE Meldung ausgewertet, in der ein
+    Timecode steht - und ein unbekannter Code einmal ins Log geschrieben,
+    damit man ihn sieht statt ihn zu verlieren."""
+    if has_timecode(reply.data):
+        _last_timecode_msg[0] = time.monotonic()
+
     if reply.code == ASYNC_TRANSPORT:
-        # Bei "display timecode" kommt diese Meldung pro Bild. Nur echte
+        # Mit "display timecode" kommt diese Meldung pro Bild. Nur echte
         # Zustandswechsel sollen Log und Automatik beschaeftigen.
         status, _active, changed = apply_transport(reply.data)
         if changed:
@@ -843,6 +858,16 @@ def handle_async(reply):
         info = apply_slot(reply.data)
         if info is not None:
             _async_seen["slot"] = True
+    elif reply.code == ASYNC_CONNECTION:
+        pass                                    # Begruessung, schon verarbeitet
+    else:
+        if has_timecode(reply.data):
+            apply_transport(reply.data)         # Timecode trotzdem mitnehmen
+        if reply.code not in _async_unknown:
+            _async_unknown.add(reply.code)
+            log("Deck meldet unbekannt: %d %s [%s]%s"
+                % (reply.code, reply.header, ", ".join(sorted(reply.data)) or "ohne Felder",
+                   " - der Timecode daraus wird benutzt." if has_timecode(reply.data) else ""))
 
 
 def enable_notifications(announce=True):
@@ -868,10 +893,22 @@ def enable_notifications(announce=True):
             ok = False
             log("Deck nimmt 'notify: %s' nicht an (%s%s) - es wird weiter "
                 "regelmaessig abgefragt." % (what, reply, reply.hint()), "warn")
-    set_state(notify=ok, timecode_stream=bool(ok and live))
+
+    # Das Deck selbst fragen, was es nun tatsaechlich meldet. Manche Geraete
+    # quittieren einen Wunsch mit "ok", schalten ihn aber nicht ein.
+    state = deck.command("notify")
+    if state.ok and state.lines:
+        log("Deck meldet laut eigener Auskunft: %s" % "; ".join(state.lines))
+        answer = state.data.get("display timecode", "")
+        if live and answer and answer.lower() != "true":
+            log("Das Deck hat 'display timecode' nicht eingeschaltet (%s) - die "
+                "Zeitanzeige folgt weiter der Kontrollabfrage." % answer, "warn")
+
+    set_state(notify=ok)
+    _last_timecode_msg[0] = 0.0
     if ok and announce:
         log("Das Deck meldet Aenderungen ab jetzt von selbst%s."
-            % (" - den Timecode laufend" if live else ""), "ok")
+            % (" - der Timecode soll laufend kommen" if live else ""), "ok")
     return ok
 
 
@@ -1217,7 +1254,11 @@ def worker_loop():
                 run_timer()
 
             remaining = interval - (time.monotonic() - last_poll)
-            set_state(seconds_until_check=max(0, int(round(remaining))))
+            # Der Strom gilt nur als lebendig, wenn wirklich etwas ankommt -
+            # nicht schon, weil das Deck den Wunsch quittiert hat.
+            streaming = (time.monotonic() - _last_timecode_msg[0]) < TIMECODE_STREAM_IDLE_S
+            set_state(seconds_until_check=max(0, int(round(remaining))),
+                      timecode_stream=streaming)
 
             # Auf Meldungen des Decks warten statt bloss zu schlafen. Kommt
             # eine, greift die Automatik sofort - nicht erst beim naechsten Poll.

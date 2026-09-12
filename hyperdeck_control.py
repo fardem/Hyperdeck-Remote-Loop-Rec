@@ -328,11 +328,15 @@ def hhmm_to_minutes(value):
 
 
 def duration_to_minutes(text):
-    """"01:30" -> 90. Anders als eine Uhrzeit darf die Stundenzahl bis 99 gehen."""
-    match = re.match(r"^\s*(\d{1,2})\s*:\s*(\d{1,2})\s*$", str(text))
+    """Dauer in Uhr-Schreibweise: "01:30" sind 90 Minuten, nicht "00:90".
+
+    Wer trotzdem "00:90" eintippt, hat 90 Minuten gemeint - der Wert wird
+    umgerechnet statt auf 59 gekuerzt. Die Anzeige zeigt danach "01:30" und
+    damit die richtige Schreibweise."""
+    match = re.match(r"^\s*(\d{1,3})\s*:\s*(\d{1,3})\s*$", str(text))
     if match is None:
         raise ValueError("Dauer erwartet als HH:MM, nicht %r" % text)
-    return int(match.group(1)) * 60 + min(59, int(match.group(2)))
+    return int(match.group(1)) * 60 + int(match.group(2))
 
 
 def minutes_to_duration(minutes):

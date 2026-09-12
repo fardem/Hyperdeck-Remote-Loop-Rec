@@ -338,8 +338,13 @@ Abstand und macht sie damit abholbar.
 | **Nahtlos** (Vorgabe) | `record: spill: slot id: {n}` mit der **eigenen** Slot-Nummer – das Deck wechselt die Datei und schreibt ohne Pause weiter | **nein** |
 | **Stopp und neu starten** | `stop`, dann `record` | ja, ein bis zwei Sekunden |
 
-`00:00` schaltet die Stückelung ab, `00:01` teilt jede Minute, `99:59` alle
-99 Stunden 59 Minuten.
+Die Zeit steht im **Uhr-Raster Stunden:Minuten** – 90 Minuten sind also
+`01:30`, nicht `00:90`. `00:00` schaltet die Stückelung ab, `00:01` teilt jede
+Minute, `99:59` alle 99 Stunden 59 Minuten.
+
+> Das Feld räumt die Eingabe selbst auf: Aus `00:90` wird `01:30`, aus `45`
+> wird `00:45`, aus `2:5` wird `02:05` – mit einem kurzen Hinweis, damit die
+> Schreibweise klar wird. Gekürzt wird dabei nichts.
 
 > Kann ein Gerät `record spill` nicht, **schaltet sich die Stückelung ab** und
 > sagt es im Log – sie greift dann nicht heimlich zum Stopp-Start-Weg, weil das

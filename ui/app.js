@@ -36,6 +36,28 @@ function fmtChunk(minutes){
   return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
 }
 
+function chunkMinutes(text){
+  // "01:30" und "1:30" -> 90. "00:90" ist keine Uhrzeit, war aber sicher als
+  // 90 Minuten gemeint -> ebenfalls 90. Eine blanke Zahl gilt als Minuten.
+  text = String(text || '').trim();
+  if (!text) return 0;
+  var parts = text.split(':');
+  if (parts.length === 2) return (Number(parts[0]) || 0) * 60 + (Number(parts[1]) || 0);
+  return Number(text) || 0;
+}
+
+function tidyChunkField(){
+  // Nach dem Tippen sofort in Uhr-Schreibweise zeigen - das erklaert das
+  // Format besser als jeder Hinweistext.
+  var el = $('f_chunk_interval');
+  var minutes = Math.min(99 * 60 + 59, chunkMinutes(el.value));
+  var clean = fmtChunk(minutes);
+  if (el.value.trim() !== clean){
+    el.value = clean;
+    if (minutes) toast('Uhr-Schreibweise: ' + minutes + ' Minuten sind ' + clean + ' Std:Min.');
+  }
+}
+
 function slotLabel(folder){
   // Die Ordner am Deck heissen je nach Modell "2", "sd2" oder "cfast2".
   var m = String(folder).match(/(\d)$/);

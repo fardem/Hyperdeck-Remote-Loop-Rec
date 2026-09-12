@@ -21,6 +21,11 @@ PATCH bei Fehlerbehebungen.
   **„Aufnahme stückeln alle (HH:MM)"** schließt sie in festem Abstand
   (`00:01` bis `99:59`, `00:00` = aus).
 
+  Die Zeit steht im **Uhr-Raster Stunden:Minuten** – 90 Minuten sind `01:30`.
+  Das Feld räumt die Eingabe selbst auf (`00:90` → `01:30`, `45` → `00:45`)
+  und erklärt die Schreibweise kurz, statt einen Wert stillschweigend zu
+  kürzen.
+
   Der Regelfall ist **nahtlos**: `record: spill: slot id: {n}` mit der eigenen
   Slot-Nummer. Laut Protokoll wechselt das Deck damit die Datei, **ohne die
   Aufnahme zu unterbrechen** – keine Lücke. Kann ein Gerät das nicht, schaltet

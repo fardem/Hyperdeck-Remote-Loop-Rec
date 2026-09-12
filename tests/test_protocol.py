@@ -187,13 +187,37 @@ def test_chunk_is_idle_without_recording():
     hc.update_settings({"chunk_interval": 0}, persist=False)
 
 
-def test_duration_parsing():
+def test_duration_is_clock_notation():
+    """Stunden:Minuten wie auf der Uhr - 90 Minuten sind 01:30."""
     assert hc.duration_to_minutes("00:01") == 1
     assert hc.duration_to_minutes("01:30") == 90
+    assert hc.duration_to_minutes("1:30") == 90          # fuehrende Null darf fehlen
+    assert hc.duration_to_minutes("02:00") == 120
     assert hc.duration_to_minutes("99:59") == 5999
-    assert hc.minutes_to_duration(90) == "01:30" and hc.minutes_to_duration(0) == "00:00"
+    assert hc.minutes_to_duration(90) == "01:30"
+    assert hc.minutes_to_duration(5999) == "99:59"
+    assert hc.minutes_to_duration(0) == "00:00"
+
+    # Wer "00:90" tippt, meint 90 Minuten - der Wert wird umgerechnet und
+    # danach in richtiger Schreibweise angezeigt, nicht auf 59 gekuerzt.
+    assert hc.duration_to_minutes("00:90") == 90
+    assert hc.minutes_to_duration(hc.duration_to_minutes("00:90")) == "01:30"
+
+    for unsinn in ("", "abc", "1:2:3", "01-30"):
+        try:
+            hc.duration_to_minutes(unsinn)
+            assert False, "%r haette abgelehnt werden muessen" % unsinn
+        except ValueError:
+            pass
+
     hc.update_settings({"chunk_interval": "02:15"}, persist=False)
     assert hc.get_settings()["chunk_interval"] == 135
+    hc.update_settings({"chunk_interval": "00:90"}, persist=False)
+    assert hc.get_settings()["chunk_interval"] == 90, "Uhr-Schreibweise umrechnen"
+    hc.update_settings({"chunk_interval": "99:59"}, persist=False)
+    assert hc.get_settings()["chunk_interval"] == 5999, "Obergrenze erreichbar"
+    hc.update_settings({"chunk_interval": "150:00"}, persist=False)
+    assert hc.get_settings()["chunk_interval"] == 5999, "darueber wird begrenzt"
     hc.update_settings({"chunk_interval": 0}, persist=False)
 
 

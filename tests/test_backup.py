@@ -76,6 +76,64 @@ def list_tree(root):
 
 # ---------------------------------------------------------------- reine Logik
 
+def test_mdtm_is_converted_to_local_time():
+    """FTP meldet Zeitstempel laut RFC 3659 in UTC. Im Dateinamen soll aber die
+    Ortszeit stehen - sonst sind die Namen im Sommer zwei Stunden zu frueh."""
+    import time as _time
+    alt_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "Europe/Berlin"
+        if hasattr(_time, "tzset"):
+            _time.tzset()
+        else:
+            return                                  # Windows: nicht umschaltbar
+        roh = hb.parse_mdtm("20260913124611")
+        assert roh == datetime.datetime(2026, 9, 13, 12, 46, 11), roh
+        lokal = hb.to_local_time(roh)
+        assert lokal == datetime.datetime(2026, 9, 13, 14, 46, 11), lokal   # MESZ
+        assert hb.to_local_time(roh, assume_utc=False) == roh, "Geraet meldet Ortszeit"
+
+        info = hb.FileInfo("2/Clip_0007.mp4", 100, lokal, roh)
+        assert hb.target_name(info) == "2026-09-13_14-46-11_Clip_0007.mp4"
+        assert hb.legacy_name(info) == "2026-09-13_12-46-11_Clip_0007.mp4"
+
+        # Im Winter gilt MEZ, also nur eine Stunde Unterschied.
+        winter = hb.to_local_time(hb.parse_mdtm("20260113124611"))
+        assert winter == datetime.datetime(2026, 1, 13, 13, 46, 11), winter
+
+        gleich = hb.FileInfo("x.mp4", 1, roh, roh)
+        assert hb.legacy_name(gleich) is None, "ohne Verschiebung kein zweiter Name"
+    finally:
+        if alt_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = alt_tz
+        if hasattr(_time, "tzset"):
+            _time.tzset()
+
+
+def test_already_saved_under_the_old_name_is_not_copied_again():
+    """Nach der Korrektur heissen neue Dateien anders. Ein Clip, der unter dem
+    alten Namen schon im Ziel liegt, darf nicht ein zweites Mal kommen."""
+    work = tempfile.mkdtemp(prefix="hdtz_")
+    try:
+        sink = hb.LocalSink(work)
+        sink.prepare()
+        roh = datetime.datetime(2026, 9, 13, 12, 46, 11)
+        lokal = datetime.datetime(2026, 9, 13, 14, 46, 11)
+        info = hb.FileInfo("2/Clip_0007.mp4", 4096, lokal, roh)
+        mirror = hb.Mirror(lambda: {}, log)
+
+        assert mirror._target_rel(sink, info) == "2/2026-09-13_14-46-11_Clip_0007.mp4"
+        write_file(os.path.join(work, "2", hb.legacy_name(info)), 4096)
+        assert mirror._target_rel(sink, info) is None, "alter Name zaehlt als gesichert"
+
+        anders = hb.FileInfo("2/Clip_0007.mp4", 9999, lokal, roh)
+        assert mirror._target_rel(sink, anders) is not None, "andere Groesse = anderer Clip"
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def test_system_entries_are_skipped():
     for name in ("System Volume Information", "$RECYCLE.BIN", ".Trashes",
                  "Thumbs.db", "WPSettings.dat", "IndexerVolumeGuid", ".DS_Store",
@@ -413,6 +471,8 @@ if __name__ == "__main__":
     test_progress_text(); print("ok  Tacho-Texte")
     test_names();            print("ok  Namensbildung")
     test_system_entries_are_skipped(); print("ok  Systemdateien ausgefiltert")
+    test_mdtm_is_converted_to_local_time(); print("ok  Zeitstempel in Ortszeit")
+    test_already_saved_under_the_old_name_is_not_copied_again(); print("ok  kein Doppel-Download")
     if HAVE_FTPD:
         test_hyperdeck_quirks(); print("ok  HyperDeck-Eigenheiten")
         test_eta_in_log();       print("ok  Restzeit im Log")

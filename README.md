@@ -5,7 +5,7 @@ Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Autom
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue?logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/WebUI-Flask-black?logo=flask&logoColor=white)
 ![Hardware](https://img.shields.io/badge/Hardware-BM%20HyperDeck-red)
-![Version](https://img.shields.io/badge/Version-3.4.0-blueviolet)
+![Version](https://img.shields.io/badge/Version-3.4.2-blueviolet)
 ![Tests](https://github.com/fardem/Hyperdeck-Remote-Loop-Rec/actions/workflows/tests.yml/badge.svg)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -333,10 +333,33 @@ werden, wenn sie abgeschlossen ist. Bei Dauerbetrieb kann das Stunden dauern.
 Das Feld **„Aufnahme stückeln alle (HH:MM)"** schließt die Datei in festem
 Abstand und macht sie damit abholbar.
 
-| Betriebsart | Was das Deck tut | Lücke? |
-| --- | --- | --- |
-| **Nahtlos** (Vorgabe) | `record: spill: slot id: {n}` mit der **eigenen** Slot-Nummer – das Deck wechselt die Datei und schreibt ohne Pause weiter | **nein** |
-| **Stopp und neu starten** | `stop`, dann `record` | ja, ein bis zwei Sekunden |
+| Betriebsart | Was das Deck tut | Lücke? | Kartenwechsel? |
+| --- | --- | --- | --- |
+| **Nahtlos** (Vorgabe) | `record: spill: slot id: {n}` mit der **eigenen** Slot-Nummer | **nein** | nein |
+| ↳ Rückfallweg | `record spill` ohne Parameter | **nein** | ja, auf die Nachbarkarte |
+| **Stopp und neu starten** | `stop`, dann `record` | ja, 1–2 s | nein |
+
+**Zum Rückfallweg:** Das Protokoll kennt beide Formen –
+
+```text
+record spill                    spill current recording to next slot
+record: spill: slot id: {n}     spill current recording to specified slot
+                                use current id to spill to same slot
+```
+
+– aber nicht jede Firmware nimmt den Parameter an. Der **HyperDeck Studio
+Mini** antwortet darauf mit `101 unsupported parameter`. Dann wird ohne
+Parameter gespillt: Die Aufnahme läuft **nahtlos** weiter, nur eben auf der
+Nachbarkarte. Das Log sagt beim ersten Mal, was Sache ist, und der aussichts-
+lose Versuch wird danach nicht wiederholt.
+
+Wer die Karte nicht wechseln will, wählt „Stopp und neu starten" und nimmt
+dafür die kurze Lücke in Kauf – ein Stückeln ohne Lücke *und* ohne Kartenwechsel
+gibt diese Firmware nicht her.
+
+Einen zeitgesteuerten „Auto-Spill" kennt das Protokoll übrigens **nicht** –
+das Stückeln muss immer von außen angestoßen werden. `configuration: usb spill`
+betrifft nur USB-Platten.
 
 Die Zeit steht im **Uhr-Raster Stunden:Minuten** – 90 Minuten sind also
 `01:30`, nicht `00:90`. `00:00` schaltet die Stückelung ab, `00:01` teilt jede
@@ -401,6 +424,22 @@ also Stunden. Puffer ist reichlich.
    jedem Formatieren wieder bei `0001` – ohne Zeitstempel würden sich Clips
    gegenseitig überschreiben. Gleicher Name bei anderer Größe → Größe wird
    angehängt. **Es wird nie überschrieben und am Deck nie gelöscht.**
+
+   Der Zeitstempel kommt über `MDTM` vom Deck und ist laut
+   [RFC 3659](https://datatracker.ietf.org/doc/html/rfc3659#section-3) in
+   **UTC** – er wird deshalb in die **Ortszeit dieses PCs** umgerechnet.
+   Im Sommer sind das zwei Stunden, im Winter eine. Stimmt die Uhrzeit in den
+   Namen trotzdem nicht, steht unter „Zugang zum Deck“ die Umschaltung
+   *„sind bereits Ortszeit“*; „Verbindung testen“ zeigt beide Werte neben der
+   PC-Uhr:
+
+   ```text
+   Zeitstempel: Deck meldet 13.09. 12:46:11 (UTC) = 14:46:11 Ortszeit, PC-Uhr 14:46:13
+   ```
+
+   > Maßgeblich bleibt die **Uhr im Deck** – die lässt sich über das Protokoll
+   > nicht stellen (siehe Fehlerbehebung). Geht sie falsch, sind auch die
+   > umgerechneten Namen falsch.
 4. Kopiert wird in eine `.part`-Datei, die erst nach vollständiger und
    größengeprüfter Übertragung umbenannt wird. Ein Abbruch hinterlässt keine
    halben Clips unter echtem Namen.

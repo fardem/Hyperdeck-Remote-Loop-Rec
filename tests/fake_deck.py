@@ -31,6 +31,7 @@ class FakeDeck(object):
         self.tc_short = False               # nur Timecode statt vollem Block
         self.accept_tc_notify = True        # False: Wunsch wird nur quittiert
         self.can_spill = True               # False: Geraet kennt "record spill" nicht
+        self.spill_slot_param = True        # False: nimmt keine Slot-Nummer an (Studio Mini)
         self.spills = []                    # Protokoll der Abschnittswechsel
         self.clip = 1
         self.log = []
@@ -210,12 +211,17 @@ class FakeDeck(object):
             if not self.can_spill:
                 send("103 unsupported" + CRLF)
                 return
+            if "slot id:" in low and not self.spill_slot_param:
+                send("101 unsupported parameter" + CRLF)
+                return
             slot = self.active
             if "slot id:" in low:
                 try:
                     slot = int(low.split("slot id:")[1].strip().split()[0])
                 except (IndexError, ValueError):
                     pass
+            else:
+                slot = 2 if self.active == 1 else 1      # ohne Parameter: naechste Karte
             self.active = slot
             self.clip += 1
             self.spills.append((slot, self.clip))

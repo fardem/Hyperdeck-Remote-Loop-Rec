@@ -238,6 +238,16 @@
           <label for="f_deck_ftp_pass">Passwort</label>
           <input id="f_deck_ftp_pass" data-key="deck_ftp_pass" type="password" autocomplete="new-password" placeholder="leer = anonym">
         </div>
+        <div class="field">
+          <label for="f_deck_time_utc">Zeitstempel des Decks</label>
+          <select id="f_deck_time_utc" data-key="deck_time_utc">
+            <option value="true">sind UTC – in Ortszeit umrechnen (Standard)</option>
+            <option value="false">sind bereits Ortszeit – unverändert lassen</option>
+          </select>
+          <span class="tip">FTP meldet Zeitstempel laut Vorgabe in UTC. Stimmt die
+            Uhrzeit in den Dateinamen nicht, hier umstellen – „Verbindung testen“
+            zeigt beide Werte im Vergleich zur PC-Uhr.</span>
+        </div>
       </div>
     </details>
     <div class="row">

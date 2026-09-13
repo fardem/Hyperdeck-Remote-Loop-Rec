@@ -13,6 +13,48 @@ PATCH bei Fehlerbehebungen.
 
 ---
 
+## [3.4.2] – 2026-09-13
+
+### Behoben
+- **Die Zeitstempel in den Dateinamen waren UTC statt Ortszeit.** Der Wert
+  kommt über `MDTM` vom Deck und ist laut RFC 3659 in UTC – er wurde aber roh
+  in den Namen übernommen. Im Sommer waren die Namen damit zwei Stunden zu
+  früh, im Winter eine. Jetzt wird in die Ortszeit dieses PCs umgerechnet.
+- Ein Clip, der unter dem **alten** Namen bereits im Ziel liegt, wird nicht
+  noch einmal geholt. Ohne das hätte die Korrektur das gesamte Archiv erneut
+  kopiert, bloß weil die Dateien jetzt anders heißen.
+
+### Neu
+- Umschaltung **„Zeitstempel des Decks sind UTC / sind bereits Ortszeit"** für
+  Geräte, die sich nicht an die Vorgabe halten.
+- „Verbindung testen" zeigt den Vergleich, mit dem sich das prüfen lässt:
+  `Deck meldet 13.09. 12:46:11 (UTC) = 14:46:11 Ortszeit, PC-Uhr 14:46:13`.
+
+---
+
+## [3.4.1] – 2026-09-13
+
+### Behoben
+- **Auto-Chunk schaltete sich am HyperDeck Studio Mini sofort ab.** Das Gerät
+  antwortet auf `record: spill: slot id: {n}` mit `101 unsupported parameter` –
+  der Befehl `record spill` existiert also, nur der im Protokoll dokumentierte
+  Parameter `slot id` nicht.
+
+  Jetzt gibt es einen Rückfallweg: Lehnt das Deck die Slot-Nummer ab, wird
+  `record spill` ohne Parameter geschickt. Die Aufnahme läuft **weiterhin
+  nahtlos** weiter, nur eben auf der Nachbarkarte. Das Log erklärt das beim
+  ersten Mal, und der aussichtslose Versuch wird danach nicht wiederholt.
+  Erst wenn auch das scheitert, schaltet sich die Stückelung ab.
+
+### Dokumentation
+- README nennt beide Befehlsformen aus dem Protokoll, den beobachteten
+  Unterschied zur Firmware des Studio Mini und die Folge: nahtlos ohne
+  Kartenwechsel geht auf diesem Gerät nicht – man hat die Wahl zwischen
+  Kartenwechsel (nahtlos) und kurzer Lücke (gleiche Karte). Außerdem: einen
+  zeitgesteuerten „Auto-Spill" kennt das Protokoll nicht.
+
+---
+
 ## [3.4.0] – 2026-09-12
 
 ### Neu

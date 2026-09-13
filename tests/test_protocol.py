@@ -140,7 +140,8 @@ def test_silent_rejection_is_detected():
 
 def _chunk_run(mode, can_spill):
     """Stellt einen faelligen Abschnittswechsel nach und liefert, was passierte."""
-    with Connected(status="record", can_spill=can_spill) as c:
+    hc._spill_slot_param["ok"] = None
+    with Connected(status="record", can_spill=can_spill, spill_slot_param=True) as c:
         hc.update_settings({"chunk_interval": 1, "chunk_mode": mode,
                             "sync_timecode": False, "timer_enabled": False}, persist=False)
         hc.STATE.update(status="record", active_slot=2, manual_stop=False)
@@ -159,6 +160,37 @@ def test_chunk_is_seamless_by_default():
     assert result["gestoppt"] is False, "eine Luecke darf nicht entstehen"
     assert result["intervall"] == 1, "Auto-Chunk bleibt an"
     assert any("nahtlos" in l for l in result["logs"]), result["logs"]
+
+
+def test_chunk_falls_back_when_slot_parameter_is_refused():
+    """So verhaelt sich der HyperDeck Studio Mini: "record spill" kennt er,
+    die Slot-Nummer dabei nicht (101). Dann wird ohne Parameter gespillt -
+    das wechselt die Karte, bleibt aber nahtlos."""
+    hc._spill_slot_param["ok"] = None
+    with Connected(status="record", spill_slot_param=False) as c:
+        hc.update_settings({"chunk_interval": 1, "chunk_mode": "spill",
+                            "sync_timecode": False, "timer_enabled": False}, persist=False)
+        hc.STATE.update(status="record", active_slot=1, manual_stop=False)
+        hc._chunk_state["started"] = time.monotonic() - 61
+        hc.run_chunker()
+        assert c.deck.spills, "es haette gespillt werden muessen"
+        assert c.deck.spills[-1][0] == 2, "ohne Parameter geht es auf die Nachbarkarte"
+        assert "stop" not in [x.lower() for x in c.deck.log], "keine Luecke"
+        assert hc.get_settings()["chunk_interval"] == 1, "Auto-Chunk bleibt an"
+        assert any("keine Slot-Nummer" in l for l in c.logs), c.logs
+        assert any("Nachbarkarte" in l for l in c.logs), c.logs
+        assert hc._spill_slot_param["ok"] is False, "einmal geprueft reicht"
+
+        # Zweiter Wechsel: der aussichtslose Versuch wird nicht wiederholt.
+        vorher = len([x for x in c.deck.log if "slot id" in x.lower()])
+        hc._chunk_state["started"] = time.monotonic() - 61
+        hc._chunk_state["next_try"] = 0.0
+        hc.run_chunker()
+        nachher = len([x for x in c.deck.log if "slot id" in x.lower()])
+        assert nachher == vorher, "der Parameter darf nicht erneut probiert werden"
+        assert len(c.deck.spills) == 2, c.deck.spills
+    hc.update_settings({"chunk_interval": 0}, persist=False)
+    hc._spill_slot_param["ok"] = None
 
 
 def test_chunk_switches_itself_off_when_spill_is_unsupported():

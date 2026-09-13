@@ -63,7 +63,7 @@ except ImportError:
 # Konfiguration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "3.4.0"       # wird in der Web-Oberflaeche und im Log angezeigt
+APP_VERSION = "3.4.2"       # wird in der Web-Oberflaeche und im Log angezeigt
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # Ablage fuer Konfiguration und Logdatei. Ueber die Umgebungsvariable
 # HYPERDECK_HOME laesst sich ein anderer Ordner waehlen - z. B. fuer eine
@@ -105,6 +105,7 @@ DEFAULT_SETTINGS = {
     "deck_ftp_port": 21,
     "deck_ftp_user": "",            # leer = anonym (Standard beim HyperDeck)
     "deck_ftp_pass": "",
+    "deck_time_utc": True,          # MDTM ist laut RFC 3659 UTC (so gut wie immer)
     "backup_enabled": False,        # automatisch im Intervall spiegeln
     "backup_interval": 15,          # Minuten
     "backup_mode": "folder",        # "folder" (Ordner/Netzlaufwerk) oder "ftp"
@@ -146,6 +147,7 @@ SETTING_TYPES = {
     "deck_ftp_port": int,
     "deck_ftp_user": str,
     "deck_ftp_pass": str,
+    "deck_time_utc": bool,
     "backup_enabled": bool,
     "backup_interval": int,
     "backup_mode": str,
@@ -728,6 +730,9 @@ def do_record(manual=False):
 
 
 _chunk_state = {"started": 0.0, "next_try": 0.0}
+# Ob das Geraet beim Spill eine Slot-Nummer annimmt. None = noch nicht geprueft.
+# Der Studio Mini kann es nicht und antwortet mit 101 (Parameter nicht unterstuetzt).
+_spill_slot_param = {"ok": None}
 
 
 def chunk_reset(reason=""):
@@ -755,13 +760,37 @@ def do_chunk():
         return False
 
     if cfg["chunk_mode"] == "spill":
-        command = ("record: spill: slot id: %d" % active) if active in (1, 2) else "record spill"
-        reply = deck.command(command, timeout=10.0)
+        # Erster Versuch: auf dieselbe Karte. Laut Protokoll geht das, indem man
+        # die eigene Slot-Nummer angibt ("use current id to spill to same slot").
+        # Nicht jede Firmware nimmt den Parameter an - der Studio Mini nicht.
+        if _spill_slot_param["ok"] is not False and active in (1, 2):
+            reply = deck.command("record: spill: slot id: %d" % active, timeout=10.0)
+            if reply.ok:
+                _spill_slot_param["ok"] = True
+                log("Neuer Aufnahmeabschnitt auf Slot %d (nahtlos, ohne Kartenwechsel)."
+                    % active, "ok")
+                chunk_reset()
+                read_transport()
+                return True
+            if reply.code in (100, 101, 103, 163):
+                _spill_slot_param["ok"] = False
+                log("Dieses Deck nimmt beim Spill keine Slot-Nummer an (%s%s) - die "
+                    "Abschnitte wechseln deshalb auf die Nachbarkarte. Nahtlos bleibt es."
+                    % (reply, reply.hint()), "warn")
+            else:
+                log("Abschnittswechsel abgelehnt: %s%s" % (reply, reply.hint()), "err")
+                return False
+
+        # Zweiter Versuch: ohne Parameter. Das Deck wechselt dabei auf die
+        # naechste Karte - ebenfalls ohne die Aufnahme zu unterbrechen.
+        reply = deck.command("record spill", timeout=10.0)
         if reply.ok:
-            log("Neuer Aufnahmeabschnitt begonnen (nahtlos, ohne Unterbrechung).", "ok")
+            log("Neuer Aufnahmeabschnitt begonnen (nahtlos) - die Aufnahme laeuft auf "
+                "der Nachbarkarte weiter.", "ok")
             chunk_reset()
             read_transport()
             return True
+
         log("Deck kann 'record spill' nicht (%s%s) - Auto-Chunk wird abgeschaltet. "
             "Wer eine kurze Luecke in Kauf nimmt, stellt die Betriebsart auf "
             "'Stopp und neu starten'." % (reply, reply.hint()), "err")
@@ -1323,6 +1352,7 @@ def worker_loop():
                 set_state(connected=True, connection_error="", busy="", device=model)
                 log("Verbunden mit %s (%s:%d)." % (model, cfg["deck_ip"], cfg["deck_port"]), "ok")
                 enable_notifications()
+                _spill_slot_param["ok"] = None   # neues Geraet, neu pruefen
                 last_poll = -1e9
                 backoff = 2.0
             except Exception as exc:

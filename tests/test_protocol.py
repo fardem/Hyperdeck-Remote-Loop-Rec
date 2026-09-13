@@ -75,14 +75,25 @@ def test_transport_notification_updates_state():
         assert c.streaming() is True
 
 
+def test_display_timecode_513_is_known():
+    """So macht es der HyperDeck Studio Mini: Code 513 mit nur dem Timecode.
+    Im Protokoll steht dieser Code nicht - er ist am Geraet beobachtet."""
+    with Connected(status="record", tc_code=hc.ASYNC_DISPLAY_TC, tc_short=True) as c:
+        c.subscribe()
+        assert c.wait_for_timecode(), "Timecode aus Code 513 wurde verworfen"
+        assert c.streaming() is True
+        assert not [l for l in c.logs if "unbekannt" in l], \
+            "513 ist bekannt und gehoert nicht als Raetsel ins Log"
+
+
 def test_unknown_code_with_timecode_is_used_and_reported():
-    """Ein Geraet, das einen anderen Code benutzt, darf nicht ins Leere laufen."""
-    with Connected(status="record", tc_code=513, tc_short=True) as c:
+    """Ein Geraet mit einem noch unbekannten Code darf nicht ins Leere laufen."""
+    with Connected(status="record", tc_code=517, tc_short=True) as c:
         c.subscribe()
         assert c.wait_for_timecode(), "Timecode aus unbekanntem Code wurde verworfen"
         assert c.streaming() is True
         hinweis = [l for l in c.logs if "unbekannt" in l]
-        assert hinweis and "513" in hinweis[0], c.logs
+        assert hinweis and "517" in hinweis[0], c.logs
         assert len(hinweis) == 1, "der Hinweis gehoert genau einmal ins Log"
 
 
@@ -125,6 +136,89 @@ def test_silent_rejection_is_detected():
         for _ in range(10):
             hc.deck.pump(0.05)
         assert c.streaming() is False, "ohne Meldungen darf kein Strom angezeigt werden"
+
+
+def _chunk_run(mode, can_spill):
+    """Stellt einen faelligen Abschnittswechsel nach und liefert, was passierte."""
+    with Connected(status="record", can_spill=can_spill) as c:
+        hc.update_settings({"chunk_interval": 1, "chunk_mode": mode,
+                            "sync_timecode": False, "timer_enabled": False}, persist=False)
+        hc.STATE.update(status="record", active_slot=2, manual_stop=False)
+        hc.chunk_reset()
+        hc._chunk_state["started"] = time.monotonic() - 61      # Abschnitt ist faellig
+        hc.run_chunker()
+        befehle = [x.lower() for x in c.deck.log]
+        return {"spills": list(c.deck.spills), "gestoppt": "stop" in befehle,
+                "intervall": hc.get_settings()["chunk_interval"], "logs": c.logs}
+
+
+def test_chunk_is_seamless_by_default():
+    """Der Regelfall: record spill auf denselben Slot, ohne Stopp."""
+    result = _chunk_run("spill", True)
+    assert result["spills"] == [(2, 2)], result
+    assert result["gestoppt"] is False, "eine Luecke darf nicht entstehen"
+    assert result["intervall"] == 1, "Auto-Chunk bleibt an"
+    assert any("nahtlos" in l for l in result["logs"]), result["logs"]
+
+
+def test_chunk_switches_itself_off_when_spill_is_unsupported():
+    """Kann das Deck kein spill, wird abgeschaltet statt heimlich zu stoppen."""
+    result = _chunk_run("spill", False)
+    assert result["spills"] == [] and result["gestoppt"] is False
+    assert result["intervall"] == 0, "muss sich abschalten"
+    assert any("spill" in l and "abgeschaltet" in l for l in result["logs"]), result["logs"]
+
+
+def test_chunk_restart_mode_accepts_the_gap():
+    """Wer die Luecke ausdruecklich waehlt, bekommt Stopp und Neustart."""
+    result = _chunk_run("restart", False)
+    assert result["gestoppt"] is True, result
+    assert any("gestoppt und neu gestartet" in l for l in result["logs"]), result["logs"]
+
+
+def test_chunk_is_idle_without_recording():
+    with Connected(status="stopped", can_spill=True) as c:
+        hc.update_settings({"chunk_interval": 1}, persist=False)
+        hc.STATE.update(status="stopped")
+        hc._chunk_state["started"] = time.monotonic() - 600
+        hc.run_chunker()
+        assert c.deck.spills == [], "ohne Aufnahme wird nicht gestueckelt"
+        assert hc.STATE["chunk_info"] == ""
+    hc.update_settings({"chunk_interval": 0}, persist=False)
+
+
+def test_duration_is_clock_notation():
+    """Stunden:Minuten wie auf der Uhr - 90 Minuten sind 01:30."""
+    assert hc.duration_to_minutes("00:01") == 1
+    assert hc.duration_to_minutes("01:30") == 90
+    assert hc.duration_to_minutes("1:30") == 90          # fuehrende Null darf fehlen
+    assert hc.duration_to_minutes("02:00") == 120
+    assert hc.duration_to_minutes("99:59") == 5999
+    assert hc.minutes_to_duration(90) == "01:30"
+    assert hc.minutes_to_duration(5999) == "99:59"
+    assert hc.minutes_to_duration(0) == "00:00"
+
+    # Wer "00:90" tippt, meint 90 Minuten - der Wert wird umgerechnet und
+    # danach in richtiger Schreibweise angezeigt, nicht auf 59 gekuerzt.
+    assert hc.duration_to_minutes("00:90") == 90
+    assert hc.minutes_to_duration(hc.duration_to_minutes("00:90")) == "01:30"
+
+    for unsinn in ("", "abc", "1:2:3", "01-30"):
+        try:
+            hc.duration_to_minutes(unsinn)
+            assert False, "%r haette abgelehnt werden muessen" % unsinn
+        except ValueError:
+            pass
+
+    hc.update_settings({"chunk_interval": "02:15"}, persist=False)
+    assert hc.get_settings()["chunk_interval"] == 135
+    hc.update_settings({"chunk_interval": "00:90"}, persist=False)
+    assert hc.get_settings()["chunk_interval"] == 90, "Uhr-Schreibweise umrechnen"
+    hc.update_settings({"chunk_interval": "99:59"}, persist=False)
+    assert hc.get_settings()["chunk_interval"] == 5999, "Obergrenze erreichbar"
+    hc.update_settings({"chunk_interval": "150:00"}, persist=False)
+    assert hc.get_settings()["chunk_interval"] == 5999, "darueber wird begrenzt"
+    hc.update_settings({"chunk_interval": 0}, persist=False)
 
 
 if __name__ == "__main__":

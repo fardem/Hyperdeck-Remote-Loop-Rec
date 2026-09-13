@@ -5,7 +5,7 @@ Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Autom
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue?logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/WebUI-Flask-black?logo=flask&logoColor=white)
 ![Hardware](https://img.shields.io/badge/Hardware-BM%20HyperDeck-red)
-![Version](https://img.shields.io/badge/Version-3.3.0-blueviolet)
+![Version](https://img.shields.io/badge/Version-3.4.0-blueviolet)
 ![Tests](https://github.com/fardem/Hyperdeck-Remote-Loop-Rec/actions/workflows/tests.yml/badge.svg)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -291,6 +291,23 @@ dort in ein Ziel deiner Wahl:
 | **Ordner** (lokal oder Netzlaufwerk) | Zielordner | `D:\Aufnahmen`, `Z:\HyperDeck` oder `\\NAS\Aufnahmen\Deck1` (UNC) |
 | **FTP-Server** | Server, Port, Benutzer, Passwort, Ordner | NAS mit FTP-Dienst, `/Aufnahmen/Deck1` |
 
+### Wird von der aktiven oder der inaktiven Karte geholt?
+
+**Von beiden – und zwar gezielt.** Die Karten erscheinen am FTP-Server als
+eigene Ordner (`1`, `2` bzw. `sd1`, `sd2`, je nach Modell). Das Programm
+wechselt mit `CWD` in den jeweiligen Ordner; welche Karte das Deck gerade
+beschreibt, spielt dafür **keine Rolle**. Die inaktive Karte lässt sich also
+jederzeit direkt ansprechen – genau das macht der Knopf „Karte sichern".
+
+Dass neue Dateien meist von der **aktiven** Karte kommen, hat einen anderen
+Grund: Dort entstehen die frisch abgeschlossenen Clips. Die inaktive Karte ist
+in der Regel längst vollständig gesichert, also gibt es dort nichts mehr zu
+holen.
+
+> Das Ethernet-Protokoll-Dokument von Blackmagic beschreibt **nur** den
+> Steuerkanal auf Port 9993 – zu FTP steht dort nichts. Der FTP-Zugang ist im
+> Gerätehandbuch unter „Transferring Files over a Network" beschrieben.
+
 ### Der FTP-Server im HyperDeck ist eigen
 
 Er beherrscht nur einen sehr kleinen Befehlssatz. Deshalb benutzt dieses
@@ -308,6 +325,35 @@ und ab da ist der Dialog verschoben (genau daran scheiterte Version 3.1.0).
 Bei jedem Verdacht auf einen verschobenen Dialog wird die Verbindung deshalb
 weggeworfen und neu aufgebaut. Geht doch etwas schief, steht der komplette
 FTP-Dialog im Ereignis-Log.
+
+### Aufnahme in Abschnitte teilen (Auto-Chunk)
+
+Eine laufende Aufnahme ist eine **offene Datei** – sie kann erst gesichert
+werden, wenn sie abgeschlossen ist. Bei Dauerbetrieb kann das Stunden dauern.
+Das Feld **„Aufnahme stückeln alle (HH:MM)"** schließt die Datei in festem
+Abstand und macht sie damit abholbar.
+
+| Betriebsart | Was das Deck tut | Lücke? |
+| --- | --- | --- |
+| **Nahtlos** (Vorgabe) | `record: spill: slot id: {n}` mit der **eigenen** Slot-Nummer – das Deck wechselt die Datei und schreibt ohne Pause weiter | **nein** |
+| **Stopp und neu starten** | `stop`, dann `record` | ja, ein bis zwei Sekunden |
+
+Die Zeit steht im **Uhr-Raster Stunden:Minuten** – 90 Minuten sind also
+`01:30`, nicht `00:90`. `00:00` schaltet die Stückelung ab, `00:01` teilt jede
+Minute, `99:59` alle 99 Stunden 59 Minuten.
+
+> Das Feld räumt die Eingabe selbst auf: Aus `00:90` wird `01:30`, aus `45`
+> wird `00:45`, aus `2:5` wird `02:05` – mit einem kurzen Hinweis, damit die
+> Schreibweise klar wird. Gekürzt wird dabei nichts.
+
+> Kann ein Gerät `record spill` nicht, **schaltet sich die Stückelung ab** und
+> sagt es im Log – sie greift dann nicht heimlich zum Stopp-Start-Weg, weil das
+> eine Lücke in der Aufnahme hinterlässt. Wer die Lücke in Kauf nimmt, stellt
+> die Betriebsart ausdrücklich um.
+
+Sinnvolle Werte: Für eine Sicherung alle 15 Minuten passt eine Stückelung von
+`00:30` bis `01:00` – kurz genug, dass nie viel offen steht, lang genug, dass
+nicht unnötig viele Dateien entstehen.
 
 ### Wann wird welche Karte gesichert?
 
@@ -447,6 +493,11 @@ tatsächlich meldet, und schreibt die Antwort ins Log:
 ```text
 Deck meldet laut eigener Auskunft: transport: true; slot: true; display timecode: true
 ```
+
+**Am HyperDeck Studio Mini beobachtet:** Er schickt seine Timecode-Meldungen
+als **`513 display timecode`** mit nur diesem einen Feld. Dieser Code steht
+nicht im Protokolldokument; er ist hier fest eingebaut, seit er am Gerät
+bestätigt wurde.
 
 Steht dort `display timecode: false`, hat das Gerät den Wunsch stillschweigend
 abgelehnt – dann sagt das Log es ausdrücklich. Und der Schalter behauptet nicht

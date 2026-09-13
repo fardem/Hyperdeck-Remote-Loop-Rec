@@ -30,6 +30,9 @@ class FakeDeck(object):
         self.tc_code = 508                  # Code der Timecode-Meldung
         self.tc_short = False               # nur Timecode statt vollem Block
         self.accept_tc_notify = True        # False: Wunsch wird nur quittiert
+        self.can_spill = True               # False: Geraet kennt "record spill" nicht
+        self.spills = []                    # Protokoll der Abschnittswechsel
+        self.clip = 1
         self.log = []
         self.clients = []
         self.lock = threading.Lock()
@@ -203,6 +206,21 @@ class FakeDeck(object):
                  % (CRLF, str(wants["transport"]).lower(), CRLF,
                     str(wants["slot"]).lower(), CRLF, CRLF, CRLF,
                     str(live).lower(), CRLF, CRLF))
+        elif low.startswith("record spill") or low.startswith("record: spill"):
+            if not self.can_spill:
+                send("103 unsupported" + CRLF)
+                return
+            slot = self.active
+            if "slot id:" in low:
+                try:
+                    slot = int(low.split("slot id:")[1].strip().split()[0])
+                except (IndexError, ValueError):
+                    pass
+            self.active = slot
+            self.clip += 1
+            self.spills.append((slot, self.clip))
+            self.announce("transport")          # Aufnahme laeuft ununterbrochen weiter
+            send("200 ok" + CRLF)
         elif low == "record":
             self.set_status("record")          # Meldung kommt VOR der Antwort
             send("200 ok" + CRLF)

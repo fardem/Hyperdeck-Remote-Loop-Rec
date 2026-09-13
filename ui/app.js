@@ -30,6 +30,34 @@ function hoursHint(mins){
   return 'gut ' + h + ':' + (m < 10 ? '0' : '') + m + ' h';
 }
 
+function fmtChunk(minutes){
+  minutes = Math.max(0, Number(minutes) || 0);
+  var h = Math.floor(minutes / 60), m = minutes % 60;
+  return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+}
+
+function chunkMinutes(text){
+  // "01:30" und "1:30" -> 90. "00:90" ist keine Uhrzeit, war aber sicher als
+  // 90 Minuten gemeint -> ebenfalls 90. Eine blanke Zahl gilt als Minuten.
+  text = String(text || '').trim();
+  if (!text) return 0;
+  var parts = text.split(':');
+  if (parts.length === 2) return (Number(parts[0]) || 0) * 60 + (Number(parts[1]) || 0);
+  return Number(text) || 0;
+}
+
+function tidyChunkField(){
+  // Nach dem Tippen sofort in Uhr-Schreibweise zeigen - das erklaert das
+  // Format besser als jeder Hinweistext.
+  var el = $('f_chunk_interval');
+  var minutes = Math.min(99 * 60 + 59, chunkMinutes(el.value));
+  var clean = fmtChunk(minutes);
+  if (el.value.trim() !== clean){
+    el.value = clean;
+    if (minutes) toast('Uhr-Schreibweise: ' + minutes + ' Minuten sind ' + clean + ' Std:Min.');
+  }
+}
+
 function slotLabel(folder){
   // Die Ordner am Deck heissen je nach Modell "2", "sd2" oder "cfast2".
   var m = String(folder).match(/(\d)$/);
@@ -548,6 +576,12 @@ async function refresh(){
 
   fillField('f_backup_mode', 'backup_mode', d.backup_mode);
   fillField('f_backup_interval', 'backup_interval', d.backup_interval);
+  fillField('f_chunk_interval', 'chunk_interval', fmtChunk(d.chunk_interval));
+  fillField('f_chunk_mode', 'chunk_mode', d.chunk_mode);
+  $('chunkInfo').textContent = d.chunk_info
+    ? ((d.chunk_mode === 'spill' ? 'Stückelung nahtlos' : 'Stückelung mit kurzer Lücke') +
+       ' alle ' + fmtChunk(d.chunk_interval) + ' Std:Min · ' + d.chunk_info)
+    : (d.chunk_interval ? 'Stückelung wartet auf die nächste Aufnahme' : '');
   fillField('f_backup_folder', 'backup_folder', d.backup_folder);
   fillField('f_backup_ftp_host', 'backup_ftp_host', d.backup_ftp_host);
   fillField('f_backup_ftp_port', 'backup_ftp_port', d.backup_ftp_port);

@@ -72,12 +72,13 @@ class BackupCancelled(BackupError):
 
 
 class FileInfo(object):
-    __slots__ = ("path", "size", "mtime")
+    __slots__ = ("path", "size", "mtime", "mtime_raw")
 
-    def __init__(self, path, size, mtime=None):
+    def __init__(self, path, size, mtime=None, mtime_raw=None):
         self.path = path        # relativer Pfad unter dem Quellordner, "/"-getrennt
         self.size = int(size)
-        self.mtime = mtime      # datetime oder None
+        self.mtime = mtime      # Ortszeit - so steht es im Zieldateinamen
+        self.mtime_raw = mtime_raw or mtime   # wie das Deck es gemeldet hat
 
     @property
     def name(self):
@@ -151,6 +152,15 @@ def target_name(info):
     return info.name
 
 
+def legacy_name(info):
+    """Der Name, den Versionen vor der Zeitzonen-Korrektur vergeben haben.
+    Wird nur geprueft, damit ein bereits gesicherter Clip nicht ein zweites
+    Mal kopiert wird, bloss weil er jetzt anders heissen wuerde."""
+    if info.mtime_raw is None or info.mtime_raw == info.mtime:
+        return None
+    return "%s_%s" % (info.mtime_raw.strftime("%Y-%m-%d_%H-%M-%S"), info.name)
+
+
 def sized_name(name, size):
     stem, ext = os.path.splitext(name)
     return "%s_%d%s" % (stem, size, ext)
@@ -180,11 +190,25 @@ class NotADirectory(BackupError):
 
 
 def parse_mdtm(value):
-    """"20260912090013" -> datetime. Die Uhrzeit kommt vom Deck."""
+    """"20260912090013" -> datetime, genau wie gemeldet (ohne Umrechnung)."""
     try:
         return datetime.datetime.strptime(str(value).strip()[:14], "%Y%m%d%H%M%S")
     except (TypeError, ValueError):
         return None
+
+
+def to_local_time(stamp, assume_utc=True):
+    """MDTM liefert laut RFC 3659 die Zeit in UTC. Fuer einen Dateinamen, den
+    ein Mensch lesen soll, ist die Ortszeit des Rechners richtig - sonst sind
+    die Namen im Sommer zwei Stunden zu frueh.
+
+    Geraete, die sich nicht an die Vorgabe halten und Ortszeit melden, stellt
+    man ueber assume_utc=False richtig."""
+    if stamp is None or not assume_utc:
+        return stamp
+    return (stamp.replace(tzinfo=datetime.timezone.utc)
+                 .astimezone()
+                 .replace(tzinfo=None))
 
 
 class _TracingFTP(ftplib.FTP):
@@ -214,10 +238,12 @@ class _TracingFTP(ftplib.FTP):
 class FtpClient(object):
     """Eine FTP-Verbindung mit gemerktem Arbeitsordner und Selbstheilung."""
 
-    def __init__(self, host, port=21, user="", password="", timeout=FTP_TIMEOUT):
+    def __init__(self, host, port=21, user="", password="", timeout=FTP_TIMEOUT,
+                 assume_utc=True):
         self.host, self.port = host, int(port or 21)
         self.user, self.password = user or "", password or ""
         self.timeout = timeout
+        self.assume_utc = assume_utc    # MDTM ist laut Vorgabe UTC
         self.ftp = None
         self.cwd_path = None
         self.trace = collections.deque(maxlen=TRACE_MAX)
@@ -404,7 +430,8 @@ class FtpClient(object):
             child = "%s/%s" % (rel, name) if rel else name
             size = self.size(name)
             if size:                            # > 0 -> eindeutig eine Datei
-                files.append(FileInfo(child, size, self.mdtm(name)))
+                raw = self.mdtm(name)
+                files.append(FileInfo(child, size, to_local_time(raw, self.assume_utc), raw))
             else:
                 folders.append((name, child))
         for name, child in folders:
@@ -733,6 +760,18 @@ class Mirror(object):
             results.append("Deck-FTP OK: %s, %s%s" % (
                 n_files(len(files)), human_size(sum(f.size for f in files)),
                 (" in " + ", ".join(tops)) if tops else ""))
+            dated = [f for f in files if f.mtime]
+            if dated:
+                newest = max(dated, key=lambda f: f.mtime)
+                jetzt = datetime.datetime.now().strftime("%H:%M:%S")
+                if cfg.get("deck_time_utc", True):
+                    results.append("Zeitstempel: Deck meldet %s (UTC) = %s Ortszeit, "
+                                   "PC-Uhr %s" % (newest.mtime_raw.strftime("%d.%m. %H:%M:%S"),
+                                                  newest.mtime.strftime("%H:%M:%S"), jetzt))
+                else:
+                    results.append("Zeitstempel: Deck meldet %s, wird als Ortszeit "
+                                   "uebernommen (PC-Uhr %s)"
+                                   % (newest.mtime.strftime("%d.%m. %H:%M:%S"), jetzt))
             self._update_tree(files)
         except Exception as exc:
             results.append("Deck-FTP FEHLER: %s" % exc)
@@ -756,7 +795,8 @@ class Mirror(object):
 
     def _make_source(self, cfg):
         return FtpClient(cfg.get("deck_ip", ""), cfg.get("deck_ftp_port", 21),
-                         cfg.get("deck_ftp_user", ""), cfg.get("deck_ftp_pass", ""))
+                         cfg.get("deck_ftp_user", ""), cfg.get("deck_ftp_pass", ""),
+                         assume_utc=cfg.get("deck_time_utc", True))
 
     def _update_tree(self, files):
         tree = {}
@@ -897,15 +937,25 @@ class Mirror(object):
 
     def _target_rel(self, sink, info):
         """Zielpfad relativ zum Zielordner - oder None, wenn schon vorhanden."""
+        def full(name):
+            return "%s/%s" % (info.folder, name) if info.folder else name
+
+        # Vor der Zeitzonen-Korrektur hiessen die Dateien anders. Liegt der Clip
+        # unter dem alten Namen schon da, wird er nicht noch einmal geholt.
+        old = legacy_name(info)
+        if old:
+            for name in (old, sized_name(old, info.size)):
+                if sink.size_of(full(name)) == info.size:
+                    return None
+
         base = target_name(info)
-        candidate = "%s/%s" % (info.folder, base) if info.folder else base
+        candidate = full(base)
         existing = sink.size_of(candidate)
         if existing is None:
             return candidate
         if existing == info.size:
             return None                                # schon gesichert
-        alt = sized_name(base, info.size)
-        candidate = "%s/%s" % (info.folder, alt) if info.folder else alt
+        candidate = full(sized_name(base, info.size))
         existing = sink.size_of(candidate)
         if existing == info.size:
             return None

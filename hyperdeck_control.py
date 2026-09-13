@@ -63,7 +63,7 @@ except ImportError:
 # Konfiguration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "3.4.1"       # wird in der Web-Oberflaeche und im Log angezeigt
+APP_VERSION = "3.4.2"       # wird in der Web-Oberflaeche und im Log angezeigt
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # Ablage fuer Konfiguration und Logdatei. Ueber die Umgebungsvariable
 # HYPERDECK_HOME laesst sich ein anderer Ordner waehlen - z. B. fuer eine
@@ -105,6 +105,7 @@ DEFAULT_SETTINGS = {
     "deck_ftp_port": 21,
     "deck_ftp_user": "",            # leer = anonym (Standard beim HyperDeck)
     "deck_ftp_pass": "",
+    "deck_time_utc": True,          # MDTM ist laut RFC 3659 UTC (so gut wie immer)
     "backup_enabled": False,        # automatisch im Intervall spiegeln
     "backup_interval": 15,          # Minuten
     "backup_mode": "folder",        # "folder" (Ordner/Netzlaufwerk) oder "ftp"
@@ -146,6 +147,7 @@ SETTING_TYPES = {
     "deck_ftp_port": int,
     "deck_ftp_user": str,
     "deck_ftp_pass": str,
+    "deck_time_utc": bool,
     "backup_enabled": bool,
     "backup_interval": int,
     "backup_mode": str,

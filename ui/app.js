@@ -590,6 +590,7 @@ async function refresh(){
   fillField('f_backup_source_path', 'backup_source_path', d.backup_source_path);
   fillField('f_deck_ftp_port', 'deck_ftp_port', d.deck_ftp_port);
   fillField('f_deck_ftp_user', 'deck_ftp_user', d.deck_ftp_user);
+  fillField('f_deck_time_utc', 'deck_time_utc', d.deck_time_utc ? 'true' : 'false');
   updateBackupMode();
   renderBackup(d);
   $('uptime').textContent = 'Dienst läuft seit ' + fmtDur(d.uptime_s);

@@ -176,9 +176,11 @@ function backupSlot(id){
 
 /* ---------- Zeitplaene ------------------------------------------------ */
 
+var MAX_TIMERS = 10;
+
 function buildTimerRows(){
   var html = '';
-  for (var i = 0; i < 3; i++){
+  for (var i = 0; i < MAX_TIMERS; i++){
     var d = '';
     for (var k = 0; k < 7; k++){
       d += '<button type="button" class="day" id="t' + i + '_d' + k +
@@ -187,7 +189,7 @@ function buildTimerRows(){
     html +=
       '<div class="trow" id="trow' + i + '" hidden>' +
         '<div class="trow-head">' +
-          '<div><div class="trow-name">Autorecord ' + (i + 1) + '</div>' +
+          '<div><div class="trow-name">Zeitplan ' + (i + 1) + '</div>' +
           '<div class="trow-sum" id="t' + i + '_sum"></div></div>' +
           '<label class="toggle-mini">aktiv' +
             '<input type="checkbox" id="t' + i + '_on" onchange="timerTouched()">' +
@@ -215,7 +217,7 @@ function toggleDay(i, k){
 function timerTouched(){
   timerDirty = true;
   $('timerHint').textContent = 'Nicht gespeichert - auf "Zeitpläne speichern" klicken.';
-  for (var i = 0; i < 3; i++){ paintRow(i); }
+  for (var i = 0; i < MAX_TIMERS; i++){ paintRow(i); }
 }
 
 function paintRow(i){
@@ -234,41 +236,51 @@ function paintRow(i){
 }
 
 function fillTimers(d){
-  var count = num(d.timer_count) || 1;
-  for (var i = 0; i < 3; i++){ $('trow' + i).hidden = (i >= count); }
+  var count = Math.max(1, Math.min(MAX_TIMERS, num(d.timer_count) || 1));
+  for (var i = 0; i < MAX_TIMERS; i++){
+    var row = $('trow' + i);
+    if (row) row.hidden = (i >= count);
+  }
   if (document.activeElement !== $('timerCount')) $('timerCount').value = count;
   if (timerDirty) return;                       // Eingaben nicht ueberschreiben
   var list = d.timers || [];
-  for (var j = 0; j < 3; j++){
+  for (var j = 0; j < MAX_TIMERS; j++){
     var t = list[j] || {};
-    $('t' + j + '_on').checked = !!t.enabled;
+    var onEl = $('t' + j + '_on');
+    if (onEl) onEl.checked = !!t.enabled;
     if (document.activeElement !== $('t' + j + '_start')) $('t' + j + '_start').value = t.start || '';
     if (document.activeElement !== $('t' + j + '_end')) $('t' + j + '_end').value = t.end || '';
     var days = t.days || [];
     for (var k = 0; k < 7; k++){
-      $('t' + j + '_d' + k).className = (days.indexOf(k) >= 0) ? 'day on' : 'day';
+      var dayBtn = $('t' + j + '_d' + k);
+      if (dayBtn) dayBtn.className = (days.indexOf(k) >= 0) ? 'day on' : 'day';
     }
     paintRow(j);
   }
 }
 
 async function setCount(value){
-  await api('/api/settings', { timer_count: value });
+  var countNum = Math.max(1, Math.min(MAX_TIMERS, parseInt(value, 10) || 1));
+  await api('/api/settings', { timer_count: countNum });
   refresh();
 }
 
 async function saveTimers(){
   var list = [];
-  for (var i = 0; i < 3; i++){
+  for (var i = 0; i < MAX_TIMERS; i++){
     var days = [];
     for (var k = 0; k < 7; k++){
-      if ($('t' + i + '_d' + k).className.indexOf('on') >= 0) days.push(k);
+      var dayBtn = $('t' + i + '_d' + k);
+      if (dayBtn && dayBtn.className.indexOf('on') >= 0) days.push(k);
     }
+    var onBox = $('t' + i + '_on');
+    var sInput = $('t' + i + '_start');
+    var eInput = $('t' + i + '_end');
     list.push({
-      enabled: $('t' + i + '_on').checked,
+      enabled: onBox ? onBox.checked : false,
       days: days,
-      start: $('t' + i + '_start').value || '00:00',
-      end: $('t' + i + '_end').value || '00:00'
+      start: (sInput ? sInput.value : '') || '08:00',
+      end: (eInput ? eInput.value : '') || '17:00'
     });
   }
   await api('/api/settings', { timers: list, timer_count: $('timerCount').value });
@@ -415,6 +427,62 @@ function updateBackupMode(){
   $('bkFtpWrap').hidden = mode !== 'ftp';
 }
 
+async function browseBackupFolder(){
+  if (window.showDirectoryPicker){
+    try {
+      var dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+      if (dirHandle && dirHandle.name){
+        var current = ($('f_backup_folder').value || '').trim();
+        var suggested = dirHandle.name;
+        if (current.indexOf('\\') >= 0){
+          var prefix = current.substring(0, current.lastIndexOf('\\') + 1);
+          suggested = prefix + dirHandle.name;
+        } else if (current.indexOf('/') >= 0){
+          var prefix = current.substring(0, current.lastIndexOf('/') + 1);
+          suggested = prefix + dirHandle.name;
+        }
+        $('f_backup_folder').value = suggested;
+        dirty['backup_folder'] = true;
+        settingsDirty = true;
+        toast('Ordner ausgewählt: ' + dirHandle.name);
+        return;
+      }
+    } catch(err){
+      if (err && err.name === 'AbortError') return;
+    }
+  }
+  var picker = $('folderPickerInput');
+  if (picker){
+    picker.value = '';
+    picker.click();
+  }
+}
+window.browseBackupFolder = browseBackupFolder;
+
+function onFolderPicked(input){
+  if (input.files && input.files.length > 0){
+    var file = input.files[0];
+    var rel = file.webkitRelativePath || '';
+    var folderName = rel.split('/')[0] || file.name;
+    if (folderName){
+      var current = ($('f_backup_folder').value || '').trim();
+      var suggested = folderName;
+      if (current.indexOf('\\') >= 0){
+        var prefix = current.substring(0, current.lastIndexOf('\\') + 1);
+        suggested = prefix + folderName;
+      } else if (current.indexOf('/') >= 0){
+        var prefix = current.substring(0, current.lastIndexOf('/') + 1);
+        suggested = prefix + folderName;
+      }
+      $('f_backup_folder').value = suggested;
+      dirty['backup_folder'] = true;
+      settingsDirty = true;
+      toast('Ordner ausgewählt: ' + folderName);
+    }
+  }
+}
+window.onFolderPicked = onFolderPicked;
+
 function renderBackup(d){
   var b = d.backup || {};
   var running = !!b.running;
@@ -466,13 +534,14 @@ function localCountdown(){
 
 function paintCountdown(){
   var v = localCountdown();
+  var bar = $('cdBar');
   if (busyNow){
     $('cd').textContent = '…';
-    $('cdBar').style.width = '100%';
+    if (bar) bar.style.width = '100%';
     return;
   }
   $('cd').textContent = (v === null) ? '--' : Math.ceil(v);
-  $('cdBar').style.width = (v === null ? 0 : Math.max(0, Math.min(100, v / lastInterval * 100))) + '%';
+  if (bar) bar.style.width = (v === null ? 0 : Math.max(0, Math.min(100, v / lastInterval * 100))) + '%';
 }
 
 async function refresh(){
@@ -536,7 +605,6 @@ async function refresh(){
   if (showErr) $('errTxt').textContent = 'Deck nicht erreichbar: ' + d.connection_error;
 
   setSwitch('loop_record', d.loop_record);
-  setSwitch('auto_record', d.auto_record);
   setSwitch('auto_loop', d.auto_loop);
   setSwitch('sync_timecode', d.sync_timecode);
   setSwitch('timer_enabled', d.timer_enabled);
@@ -548,19 +616,16 @@ async function refresh(){
         : 'Das Deck schickt den Timecode laufend statt nur bei der Kontrollabfrage');
   setSwitch('backup_enabled', d.backup_enabled);
   setSwitch('backup_block_format', d.backup_block_format);
-  $('autoRecHint').textContent = d.timer_enabled
-    ? 'Ruht, solange der Timer aktiv ist - der Zeitplan entscheidet'
-    : 'Startet die Aufnahme neu, wenn das Deck steht';
   backupTarget = !!(d.backup_mode === 'ftp' ? d.backup_ftp_host : d.backup_folder);
 
-  // Die Unterschalter haengen am Hauptschalter Loop-Record
+  // Der Auto-Loop-Schalter haengt am Hauptschalter Loop-Record
   var lr = !!d.loop_record;
-  ['auto_record','auto_loop'].forEach(function(key){
-    var box = $('sw_' + key);
-    box.disabled = !lr;
-    var row = box.parentNode;
+  var loopBox = $('sw_auto_loop');
+  if (loopBox) {
+    loopBox.disabled = !lr;
+    var row = loopBox.parentNode;
     if (row && row.style) row.style.opacity = lr ? '' : '.45';
-  });
+  }
 
   fillTimers(d);
 
@@ -595,10 +660,72 @@ async function refresh(){
   renderBackup(d);
   $('uptime').textContent = 'Dienst läuft seit ' + fmtDur(d.uptime_s);
 
+  // Tab-Badges aktualisieren
+  var timerBadge = $('tabBadge_timer');
+  if (timerBadge) {
+    if (d.timer_enabled) {
+      timerBadge.removeAttribute('hidden');
+      if (d.timer_active) {
+        timerBadge.textContent = 'REC ' + d.timer_active;
+        timerBadge.className = 'tab-badge rec';
+      } else {
+        timerBadge.textContent = 'Aktiv';
+        timerBadge.className = 'tab-badge';
+      }
+    } else {
+      timerBadge.setAttribute('hidden', '');
+    }
+  }
+
+  var bkBadge = $('tabBadge_backup');
+  if (bkBadge) {
+    var isBkRunning = !!(d.backup && d.backup.running);
+    if (isBkRunning) {
+      bkBadge.removeAttribute('hidden');
+      bkBadge.textContent = 'Läuft';
+      bkBadge.className = 'tab-badge bk';
+    } else if (d.backup_enabled) {
+      bkBadge.removeAttribute('hidden');
+      bkBadge.textContent = 'Auto';
+      bkBadge.className = 'tab-badge';
+    } else {
+      bkBadge.setAttribute('hidden', '');
+    }
+  }
+
   renderLog(d);
 }
 
+function showTab(tabId){
+  var tabs = ['control', 'timer', 'backup', 'settings', 'log'];
+  tabs.forEach(function(t){
+    var panel = $('tabPanel_' + t);
+    var btn = $('tabBtn_' + t);
+    if (panel) {
+      if (t === tabId) panel.removeAttribute('hidden');
+      else panel.setAttribute('hidden', '');
+    }
+    if (btn) {
+      if (t === tabId) {
+        btn.classList.add('active');
+        btn.setAttribute('aria-selected', 'true');
+      } else {
+        btn.classList.remove('active');
+        btn.setAttribute('aria-selected', 'false');
+      }
+    }
+  });
+  try { localStorage.setItem('hyperdeck_active_tab', tabId); } catch(e){}
+}
+window.showTab = showTab;
+
 buildTimerRows();
+(function initTab(){
+  var saved = 'control';
+  try { saved = localStorage.getItem('hyperdeck_active_tab') || 'control'; } catch(e){}
+  showTab(saved);
+})();
 setInterval(function(){ if (!document.hidden) refresh(); }, 1000);
 setInterval(function(){ if (!document.hidden) paintCountdown(); }, 250);
 refresh();
+

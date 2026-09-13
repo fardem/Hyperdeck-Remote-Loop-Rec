@@ -5,7 +5,7 @@ Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Autom
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue?logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/WebUI-Flask-black?logo=flask&logoColor=white)
 ![Hardware](https://img.shields.io/badge/Hardware-BM%20HyperDeck-red)
-![Version](https://img.shields.io/badge/Version-3.4.2-blueviolet)
+![Version](https://img.shields.io/badge/Version-3.5.0-blueviolet)
 ![Tests](https://github.com/fardem/Hyperdeck-Remote-Loop-Rec/actions/workflows/tests.yml/badge.svg)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -44,14 +44,15 @@ Standardmäßig stoppt ein Blackmagic HyperDeck die Aufnahme, sobald beide einge
 ## ✨ Hauptfunktionen
 
 * 🔄 **Intelligenter Auto-Loop:** Erkennt, wenn die aktive Karte unter den eingestellten Schwellenwert fällt (z. B. `< 5 Min.`), und formatiert die inaktive Karte rechtzeitig vor dem automatischen Slot-Wechsel.
-* 🔴 **Auto-Record:** Startet die Aufnahme selbstständig neu, falls das Gerät steht (z. B. nach Signalverlust oder Stromausfall).
 * 🎚️ **Hauptschalter „Loop-Record“:** Schaltet die komplette Endlos-Automatik mit einem Klick aus – das Werkzeug wird dann zur reinen Fernbedienung.
-* ⏰ **Timer-Aufnahme:** Bis zu drei Zeitpläne mit Wochentagen und Uhrzeiten (Vorgabe **Mo–Fr 08:45–18:30 Uhr**). Der Rekorder startet und stoppt ohne Zutun, auch über Mitternacht hinweg.
+* ⏰ **Timer-Aufnahme (bis zu 10 Zeitpläne):** Bis zu 10 Zeitpläne mit Wochentagen, Start- und Endzeiten. Der Rekorder startet und stoppt punktgenau und verlässlich zur eingestellten Zeit – auch über Mitternacht hinweg.
+* 📁 **Windows-Ordnerauswahl (Browser):** Lokale Sicherungsverzeichnisse lassen sich direkt über einen integrierten Dateibrowser auswählen.
+* 🏷️ **Dynamische Karten-Namen:** Formatierte Karten erhalten auf Wunsch automatisch strukturierte Datenträgernamen mit aktuellem Datum (z. B. `Deck_{YYYYMMDD}`).
 * 💾 **Sicherung der Aufnahmen:** Fertige Clips werden über den FTP-Server des HyperDecks in einen **lokalen Ordner**, auf ein **Netzlaufwerk** (Laufwerksbuchstabe oder UNC-Pfad) oder auf einen **FTP-Server** (NAS) gespiegelt – automatisch im Intervall oder per Knopfdruck, mit Fortschrittsanzeige. Auf Wunsch leert Auto-Loop eine Karte erst, wenn ihre Clips gesichert sind.
-* 🔒 **Manueller Stopp-Schutz (Safety Interlock):** Drückt ein Operator manuell auf „Stopp“, verriegelt sich Auto-Record. Die Automatik funkt nicht eigenmächtig dazwischen, bis sie explizit freigegeben oder eine neue Aufnahme gestartet wird.
+* 🔒 **Manueller Stopp-Schutz:** Drückt ein Operator manuell auf „Stopp“, bleibt das Gerät gestoppt und wird nicht durch unbedachte Hintergrundautomatiken gestört.
 * 🕒 **Timecode-Synchronisation:** Setzt den Start-Timecode des Decks auf Wunsch automatisch auf die aktuelle PC-Systemzeit (`HH:MM:SS:00`).
 * ⚡ **BM-Token-Formatierung:** Vollständige Unterstützung des zweistufigen Blackmagic-Protokolls (`prepare` $\rightarrow$ `Token auslesen` $\rightarrow$ `confirm`) inklusive 180-Sekunden-Cooldown gegen Mehrfach-Löschungen.
-* 🌐 **Responsives Dark-Mode Webinterface:** Timecode, Tally, Füllstandsbalken, Live-Countdown und Systemlog synchronisieren sich verzögerungsfrei und flüssig im Browser.
+* 🌐 **Strukturierte & aufgeräumte Web-UI:** Intuitive Reiter-Einteilung, ruhige Kartendarstellung ohne störende Animationen und Live-Synchronisation im Browser.
 * 💾 **Live-Konfiguration:** Alle Parameter sind im laufenden Betrieb in der Web-UI änderbar und werden persistent in `hyperdeck_config.json` gespeichert.
 * 🚀 **Startet und öffnet sich selbst:** `start.bat` (Windows) bzw. `start.sh` prüft Python, installiert die Abhängigkeiten und startet den Dienst – der Browser geht automatisch mit der richtigen Adresse auf. Das Konsolenfenster bleibt in jedem Fall offen.
 * ⚡ **Reagiert sofort:** Das Deck meldet Änderungen von sich aus (`notify`), statt abgefragt zu werden. Endet eine Aufnahme, greift die Automatik in unter einer Sekunde – nicht erst bei der nächsten Abfrage.
@@ -238,44 +239,41 @@ Die Weboberfläche ist in funktionale Bereiche gegliedert:
 
 ## ⏰ Timer-Aufnahme (Zeitsteuerung)
 
-Das Panel **Timer-Aufnahme** nimmt bis zu drei Zeitpläne auf („Autorecord 1“ bis
-„Autorecord 3“). Ist der Schalter **Timer aktiv** an, startet und stoppt der
-Rekorder vollautomatisch zur eingestellten Uhrzeit – niemand muss vor Ort sein.
+Das Panel **Timer-Aufnahme** nimmt bis zu 10 Zeitpläne auf („Zeitplan 1“ bis
+„Zeitplan 10“). Ist der Schalter **Timer aktiv** an, startet und stoppt der
+Rekorder vollautomatisch zur eingestellten Uhrzeit – verlässlich und ohne Bedienaufwand.
 
 | Bedienelement | Bedeutung |
 | --- | --- |
 | **Timer aktiv** | Hauptschalter der Zeitsteuerung. |
-| **Anzahl Zeitpläne** | 1 bis 3. Es werden genau so viele Zeilen eingeblendet. |
+| **Anzahl Zeitpläne** | 1 bis 10. Es werden genau so viele Zeilen eingeblendet. |
 | **aktiv** (je Zeile) | Einzelnen Zeitplan ein- oder ausschalten, ohne ihn zu löschen. |
 | **Mo … So** | Wochentage anklicken, an denen dieser Zeitplan gelten soll. |
 | **Start / Ende** | Uhrzeiten im 24-Stunden-Format. |
 | **Zeitpläne speichern** | Übernimmt die Zeilen. Vorher erscheint der Hinweis „Nicht gespeichert“. |
 | **Verwerfen** | Holt den gespeicherten Stand zurück. |
 
-**Voreinstellung:** Autorecord 1 = Mo–Fr, **08:45 bis 18:30 Uhr**.
+**Voreinstellung:** Zeitplan 1 = Mo–Fr, **08:45 bis 18:30 Uhr**.
 
 Die Statuszeile über den Zeilen zeigt immer den aktuellen Stand, z. B.
-`Autorecord 1 nimmt auf, Fenster bis 18:30 Uhr` oder
-`Naechster Start: Autorecord 1 morgen um 08:45 Uhr`. Läuft ein Fenster, erscheint
+`Zeitplan 1 nimmt auf bis 18:30 Uhr (noch 45 min)` oder
+`Nächster Start: Heute um 14:00 Uhr (Zeitplan 2, in 1 h 20 min)`. Läuft ein Fenster, erscheint
 zusätzlich oben ein grüner Hinweisbalken.
 
 ### Verhalten im Detail
 
+- **Punktgenauer Stopp:** Sobald das Ende eines Zeitfensters erreicht ist, sendet das
+  System automatisch den Stopp-Befehl an das HyperDeck und beendet die Aufnahme planmäßig.
 - **Über Mitternacht:** Ist die Endzeit kleiner als die Startzeit (z. B.
   `22:00`–`06:00`), läuft das Fenster über den Tageswechsel. Maßgeblich ist der
   Wochentag des **Starts**.
-- **Vorrang:** Bei scharfem Timer entscheidet allein der Zeitplan über Start und
-  Stopp. Auto-Record funkt nicht dazwischen und kann den Timer-Stopp nicht
-  überrennen. Auto-Loop (Kartenwechsel) arbeitet währenddessen normal weiter.
-- **Ausfallsicher:** Bricht die Verbindung ab oder startet der PC neu, prüft der
-  Dienst beim Verbinden erneut, ob gerade ein Fenster läuft, und nimmt die
-  Aufnahme wieder auf. Ein verpasster Stopp wird bis zu fünf Minuten lang
-  nachgeholt.
+- **Volle Kontrolle ohne Fremdeingriffe:** Es gibt keine ungefragte Auto-Record-Automatik mehr,
+  die gegen den Willen des Operators Aufnahmen erzwingt. Ein aktiver Zeitplan bestimmt Start und Stopp.
 - **Manueller Stopp:** Drückt jemand während eines Fensters auf „Aufnahme
   stoppen“, bleibt es gestoppt – der **nächste** Termin startet aber wieder
   ganz normal.
-- **Mehrere Zeitpläne** dürfen sich denselben Tag teilen (z. B. 08:45–12:00 und
-  14:00–18:30). Der erste passende Zeitplan gewinnt.
+- **Bis zu 10 Zeitpläne** dürfen flexibel kombiniert werden (z. B. Vormittags-, Nachmittags- und Wochenendschichten).
+  Der erste passende Zeitplan greift.
 
 ---
 

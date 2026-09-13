@@ -13,7 +13,33 @@ PATCH bei Fehlerbehebungen.
 
 ---
 
-## [3.4.2] – 2026-09-13
+## [3.5.0] – 2026-09-13
+
+### Neu
+- **Bis zu 10 flexible Zeitpläne:** Das Timer-Modul unterstützt jetzt 1 bis 10 unabhängig
+  konfigurierbare Zeitpläne mit Wochentagsauswahl, Start- und Endzeit (vorher auf 3 begrenzt).
+- **Punktgenauer Timer-Stopp:** Das automatische Stoppen beim Erreichen der Endzeit eines
+  Zeitplans wurde fest im Scheduler verankert. Das Deck stoppt planmäßig und schaltet in
+  den Modus GESTOPPT.
+- **Präzise Countdown- und Statusanzeige:** Der Timer zeigt bei laufender Aufnahme die
+  verbleibende Restzeit und außerhalb von Zeitfenstern den nächsten anstehenden Starttermin
+  inklusive Wochentag und Countdown (z. B. „Nächster Start: Morgen um 09:00 Uhr in 14 h“).
+- **Windows-Dateibrowser / Ordnerauswahl:** Grafischer Verzeichnis-Browser zur bequemen
+  Auswahl des lokalen Sicherungsordners ohne manuelle Pfadeingabe.
+- **Datumsbasierte Datenträger-Benennung:** Einstellbares Namensmuster für Kartenformatierungen
+  mit Platzhaltern (z. B. `Deck_{YYYYMMDD}` oder `Deck_{YYYY-MM-DD}`).
+- **Strukturierte Reiter-Navigation:** Aufteilung der Weboberfläche in logische Tabs
+  (Steuerung & Automatik, Zeitpläne, Datensicherung, Einstellungen, Protokoll) für
+  eine aufgeräumte und übersichtliche Bedienung.
+
+### Geändert
+- **Auto-Record vollständig entfernt:** Das eigenmächtige Neustarten der Aufnahme bei Stillstand
+  des Decks wurde komplett ausgebaut, um Konflikte mit manuellen Stopps und Timerplänen
+  zuverlässig zu verhindern. Aufnahmen erfolgen ausschließlich bewusst manuell oder nach Zeitplan.
+- **Beruhigte Kartenslot-Optik:** Wandernde Animationsbalken wurden entfernt, die Slot-Karten
+  sind kompakter und übersichtlicher gestaltet.
+
+---
 
 ### Behoben
 - **Die Zeitstempel in den Dateinamen waren UTC statt Ortszeit.** Der Wert

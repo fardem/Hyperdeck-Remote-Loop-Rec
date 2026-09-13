@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>HyperDeck Control</title>
+<meta name="description" content="Web control and monitoring interface for Blackmagic HyperDeck Studio video recorders">
+<meta property="og:title" content="HyperDeck Control">
+<meta property="og:description" content="Web control and monitoring interface for Blackmagic HyperDeck Studio video recorders">
 <link rel="stylesheet" href="/ui/style.css">
 </head>
 <body>
@@ -32,7 +35,6 @@
 
     <div class="poll">
       <span><span id="pollLabel">Nächste Abfrage in </span><b id="cd" style="color:var(--txt);font-family:var(--mono)">--</b> s</span>
-      <div class="track2"><span id="cdBar" style="width:100%"></span></div>
       <span id="lastPoll"></span>
     </div>
   </div>
@@ -41,8 +43,8 @@
   <div id="noticeTimer" class="notice timer" hidden><span id="timerTxt"></span></div>
   <div id="noticeCard" class="notice lock" hidden><span id="cardTxt"></span></div>
   <div id="noticeLock" class="notice lock" hidden>
-    <span>Manuell gestoppt. Auto-Record bleibt aus, bis du ihn freigibst.</span>
-    <button class="b-warn b-sm" onclick="send('resume_auto')">Auto-Record freigeben</button>
+    <span>Manuell gestoppt. Die Aufnahme bleibt aus, bis du sie startest oder der nächste Zeitplan greift.</span>
+    <button class="b-warn b-sm" onclick="send('resume_auto')">Manuelle Sperre aufheben</button>
   </div>
   <div id="noticeBusy" class="notice busy" hidden><span id="busyTxt"></span></div>
   <div id="noticeErr" class="notice err" hidden><span id="errTxt"></span></div>
@@ -50,9 +52,35 @@
   <!-- Karten -->
   <div class="slots" id="slots"></div>
 
-  <!-- Bedienung -->
-  <div class="panel">
-    <div class="eyebrow">Bedienung</div>
+  <!-- Navigation / Funktions-Reiter -->
+  <nav class="nav-tabs" role="tablist" aria-label="Hauptfunktionen">
+    <button class="nav-tab active" id="tabBtn_control" onclick="showTab('control')" role="tab" aria-selected="true">
+      <span class="tab-icon">🎛️</span>
+      <span>Steuerung & Automatik</span>
+    </button>
+    <button class="nav-tab" id="tabBtn_timer" onclick="showTab('timer')" role="tab" aria-selected="false">
+      <span class="tab-icon">⏰</span>
+      <span>Timer-Aufnahme</span>
+      <span class="tab-badge" id="tabBadge_timer" hidden>Aktiv</span>
+    </button>
+    <button class="nav-tab" id="tabBtn_backup" onclick="showTab('backup')" role="tab" aria-selected="false">
+      <span class="tab-icon">💾</span>
+      <span>Sicherung</span>
+      <span class="tab-badge bk" id="tabBadge_backup" hidden>Läuft</span>
+    </button>
+    <button class="nav-tab" id="tabBtn_settings" onclick="showTab('settings')" role="tab" aria-selected="false">
+      <span class="tab-icon">⚙️</span>
+      <span>Einstellungen</span>
+    </button>
+    <button class="nav-tab" id="tabBtn_log" onclick="showTab('log')" role="tab" aria-selected="false">
+      <span class="tab-icon">📋</span>
+      <span>Ereignisse</span>
+    </button>
+  </nav>
+
+  <!-- 1. Bedienung & Automatik -->
+  <div id="tabPanel_control" class="panel tab-panel" role="tabpanel">
+    <div class="eyebrow">Bedienung & Automatik</div>
     <p class="lead">Direkte Steuerung des Decks und die Automatik für den Dauerbetrieb.</p>
     <div class="buttons">
       <button class="b-rec" onclick="send('record')">Aufnahme starten</button>
@@ -63,17 +91,12 @@
 
     <div class="switches">
       <label class="sw">
-        <div><div class="t">Loop-Record</div><div class="d">Hauptschalter: aus = keinerlei Automatik</div></div>
+        <div><div class="t">Loop-Record</div><div class="d">Hauptschalter für Endlosaufnahme über zwei Slots</div></div>
         <input type="checkbox" id="sw_loop_record" onchange="setFlag('loop_record',this.checked)">
         <span class="track" id="tr_loop_record"></span>
       </label>
       <label class="sw">
-        <div><div class="t">Auto-Record</div><div class="d" id="autoRecHint">Startet die Aufnahme neu, wenn das Deck steht</div></div>
-        <input type="checkbox" id="sw_auto_record" onchange="setFlag('auto_record',this.checked)">
-        <span class="track" id="tr_auto_record"></span>
-      </label>
-      <label class="sw">
-        <div><div class="t">Auto-Loop</div><div class="d">Formatiert die inaktive Karte rechtzeitig</div></div>
+        <div><div class="t">Auto-Loop</div><div class="d">Formatiert die inaktive Karte rechtzeitig für Endlosbetrieb</div></div>
         <input type="checkbox" id="sw_auto_loop" onchange="setFlag('auto_loop',this.checked)">
         <span class="track" id="tr_auto_loop"></span>
       </label>
@@ -90,8 +113,8 @@
     </div>
   </div>
 
-  <!-- Timer -->
-  <div class="panel">
+  <!-- 2. Timer -->
+  <div id="tabPanel_timer" class="panel tab-panel" role="tabpanel" hidden>
     <div class="eyebrow">Timer-Aufnahme</div>
     <p class="lead">Nimmt zu festen Uhrzeiten auf und stoppt wieder – ohne dass jemand da sein muss.</p>
     <div class="switches" style="margin-top:0">
@@ -101,9 +124,18 @@
         <span class="track" id="tr_timer_enabled"></span>
       </label>
       <div class="sw">
-        <div><div class="t">Anzahl Zeitpläne</div><div class="d">1 bis 3 Einträge</div></div>
+        <div><div class="t">Anzahl Zeitpläne</div><div class="d">1 bis 10 Einträge</div></div>
         <select id="timerCount" class="mini-select" onchange="setCount(this.value)">
-          <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="5">5</option>
+          <option value="6">6</option>
+          <option value="7">7</option>
+          <option value="8">8</option>
+          <option value="9">9</option>
+          <option value="10">10</option>
         </select>
       </div>
     </div>
@@ -118,8 +150,8 @@
     </div>
   </div>
 
-  <!-- Sicherung -->
-  <div class="panel">
+  <!-- 3. Sicherung -->
+  <div id="tabPanel_backup" class="panel tab-panel" role="tabpanel" hidden>
     <div class="eyebrow">Sicherung der Aufnahmen</div>
     <p class="lead">Kopiert fertige Clips vom Deck auf diesen PC oder ins Netz.
        Am Deck wird dabei nichts gelöscht und im Ziel nichts überschrieben.</p>
@@ -186,9 +218,13 @@
       </div>
       <div class="field wide" id="bkFolderWrap">
         <label for="f_backup_folder">Wohin gesichert wird</label>
-        <input id="f_backup_folder" data-key="backup_folder" type="text" placeholder="D:\Aufnahmen  ·  Z:\HyperDeck  ·  \\NAS\Aufnahmen\Deck1">
+        <div class="input-with-btn">
+          <input id="f_backup_folder" data-key="backup_folder" type="text" placeholder="D:\Aufnahmen  ·  Z:\HyperDeck  ·  \\NAS\Aufnahmen\Deck1">
+          <button type="button" class="b-sm" id="btnBrowseFolder" onclick="browseBackupFolder()" title="Windows-Ordnerauswahl öffnen">📁 Durchsuchen…</button>
+        </div>
+        <input type="file" id="folderPickerInput" webkitdirectory directory hidden onchange="onFolderPicked(this)">
         <span class="tip">Ordner auf diesem PC, ein Netzlaufwerk oder eine Freigabe
-          (<code>\\Server\Freigabe\Ordner</code>). Wird bei Bedarf angelegt.</span>
+          (<code>\\Server\Freigabe\Ordner</code>). Wird bei Bedarf angelegt. Über „Durchsuchen…“ bequem per Windows-Auswahl wählen.</span>
       </div>
       <div class="field wide" id="bkFtpWrap" hidden>
         <div class="fields">
@@ -256,8 +292,8 @@
     </div>
   </div>
 
-  <!-- Einstellungen -->
-  <div class="panel">
+  <!-- 4. Einstellungen -->
+  <div id="tabPanel_settings" class="panel tab-panel" role="tabpanel" hidden>
     <div class="eyebrow">Einstellungen</div>
     <p class="lead">Verbindung zum Deck und Verhalten der Endlosaufnahme.</p>
     <div class="fields">
@@ -291,7 +327,8 @@
       </div>
       <div class="field">
         <label for="f_format_name">Name der Karte nach dem Leeren</label>
-        <input id="f_format_name" data-key="format_name" type="text">
+        <input id="f_format_name" data-key="format_name" type="text" placeholder="Deck_{YYYYMMDD}">
+        <span class="tip">Datenträger-Name mit automatischem Datumsstempel (z. B. <code>Deck_{YYYYMMDD}</code> ergibt <b>Deck_20260913</b> mit dem Formatierungsdatum. Auch <code>{YYYY-MM-DD}</code> oder <code>{SLOT}</code> möglich).</span>
       </div>
     </div>
     <details class="more">
@@ -311,8 +348,8 @@
     </div>
   </div>
 
-  <!-- Ereignisse -->
-  <div class="panel">
+  <!-- 5. Ereignisse -->
+  <div id="tabPanel_log" class="panel tab-panel" role="tabpanel" hidden>
     <div class="eyebrow">Ereignisse</div>
     <p class="lead">Was das Programm getan hat – die letzten 250 Zeilen.</p>
     <div class="log" id="log"></div>

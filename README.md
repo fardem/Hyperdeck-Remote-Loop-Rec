@@ -5,7 +5,7 @@ Ein ausfallsicherer, thread-entkoppelter Web-Controller mit Endlosaufnahme-Autom
 ![Python](https://img.shields.io/badge/Python-3.7%2B-blue?logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/WebUI-Flask-black?logo=flask&logoColor=white)
 ![Hardware](https://img.shields.io/badge/Hardware-BM%20HyperDeck-red)
-![Version](https://img.shields.io/badge/Version-3.5.0-blueviolet)
+![Version](https://img.shields.io/badge/Version-3.6.0-blueviolet)
 ![Tests](https://github.com/fardem/Hyperdeck-Remote-Loop-Rec/actions/workflows/tests.yml/badge.svg)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -653,7 +653,7 @@ POST /api/settings
 }
 ```
 
-Zeitpläne setzen (die Liste enthält immer alle drei Einträge, `days`: 0 = Montag
+Zeitpläne setzen (die Liste enthält immer alle zehn Einträge, `days`: 0 = Montag
 … 6 = Sonntag):
 
 ```json

@@ -13,6 +13,48 @@ PATCH bei Fehlerbehebungen.
 
 ---
 
+## [3.6.0] – 2026-09-15
+
+Die Oberfläche aus 3.5.0 bleibt, der Unterbau kehrt zu Python zurück.
+
+### Behoben
+- **Die Sicherung sicherte nichts.** In 3.5.0 war sie eine Attrappe: ein Timer
+  zählte bis sechs und meldete dann „3 Dateien gesichert (24 GB)“ – mit fest
+  einprogrammierten Dateinamen, ohne eine Zeile Kopiercode und ohne FTP-Bibliothek
+  im Projekt. Auch „Verbindung testen“ meldete Erfolg, ohne etwas zu prüfen.
+  Wer darauf vertraut und anschließend eine Karte leert, verliert die Aufnahmen.
+  Das echte Sicherungsmodul (`hyperdeck_backup.py`) ist zurück.
+- **Ein nicht erreichbares Deck galt als verbunden.** Schlug der Verbindungsaufbau
+  fehl, meldete der Dienst „bereit“ und lieferte erfundene Kartenfüllstände,
+  einen selbst hochgezählten Timecode und den Zustand „verbunden“. Ein WLAN-Aussetzer
+  war damit nicht mehr zu erkennen. Jetzt steht wieder der Fehler da.
+- **Das Formatieren war falsch aufgesetzt.** Gesendet wurde ein einzelnes
+  `format: slot: {n} …`; das Protokoll verlangt zwei Schritte
+  (`format: slot id: {n} prepare: …` → Token → `format: confirm: {token}`).
+  Die Oberfläche meldete den Erfolg trotzdem – per Zeitschaltung, nicht nach
+  Antwort des Decks. Ebenso `slot info: {n}` statt `slot info: slot id: {n}`.
+- **Die Sperre „erst sichern, dann leeren“ war wirkungslos.** `backup_block_format`
+  stand in den Einstellungen, wurde im Code aber nie abgefragt.
+- **Auto-Chunk, die UTC-Korrektur und die Live-Timecode-Meldungen (Code 513)**
+  waren als Schalter vorhanden, ohne Funktion dahinter.
+- **Ein verpasster Timer-Stopp wurde nach fünf Minuten aufgegeben.** Fiel das
+  Deck genau zum Fensterende kurz aus, lief die Aufnahme die ganze Nacht weiter.
+  Der Stopp bleibt jetzt offen, bis er greift – eine später von Hand gestartete
+  Aufnahme hebt ihn auf.
+
+### Neu
+- Läuft eine Aufnahme außerhalb aller Zeitfenster, weist das Protokoll einmalig
+  darauf hin. Gestoppt wird sie nicht, denn sie kann von Hand gestartet worden sein.
+
+### Geändert
+- **Bis zu 10 Zeitpläne** statt drei, passend zur neuen Oberfläche.
+- Die Oberfläche aus 3.5.0 bleibt unverändert: Reiter-Navigation, kompakte
+  Kartenslots, ruhiger Countdown ohne wandernden Balken.
+- `start.bat`, die Tests und der CI-Ablauf sind zurück; `server.ts`,
+  `package.json`, `tsconfig.json` und `metadata.json` sind entfernt.
+
+---
+
 ## [3.5.0] – 2026-09-13
 
 ### Neu
@@ -40,6 +82,8 @@ PATCH bei Fehlerbehebungen.
   sind kompakter und übersichtlicher gestaltet.
 
 ---
+
+## [3.4.2] – 2026-09-13
 
 ### Behoben
 - **Die Zeitstempel in den Dateinamen waren UTC statt Ortszeit.** Der Wert

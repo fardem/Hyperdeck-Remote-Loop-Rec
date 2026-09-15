@@ -13,3 +13,8 @@ hyperdeck_config.json.tmp
 
 # Tests
 .pytest_cache/
+
+# Node-Reste aus dem TypeScript-Zwischenstand
+node_modules/
+package-lock.json
+dist/

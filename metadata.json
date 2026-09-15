@@ -1,6 +1,0 @@
-{
-  "name": "HyperDeck Control",
-  "description": "Web control and monitoring interface for Blackmagic HyperDeck Studio video recorders",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
